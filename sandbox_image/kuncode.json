@@ -1,0 +1,126 @@
+{
+  "$schema": "./kuncode.schema.json",
+  "model": "{env:KUNCODE_MODEL}",
+  "provider": {
+    "openai": {
+      "options": {
+        "apiKey": "{env:OPENAI_API_KEY}",
+        "baseURL": "{env:OPENAI_BASE_URL}"
+      }
+    },
+    "anthropic": {
+      "options": {
+        "apiKey": "{env:ANTHROPIC_API_KEY}",
+        "baseURL": "{env:ANTHROPIC_BASE_URL}"
+      }
+    },
+    "deepseek": {
+      "options": {
+        "apiKey": "{env:DEEPSEEK_API_KEY}",
+        "baseURL": "{env:DEEPSEEK_BASE_URL}"
+      }
+    },
+    "alibaba": {
+      "options": {
+        "apiKey": "{env:DASHSCOPE_API_KEY}"
+      }
+    },
+    "google": {
+      "options": {
+        "apiKey": "{env:GEMINI_API_KEY}"
+      }
+    },
+    "azure-openai": {
+      "options": {
+        "apiKey": "{env:AZURE_OPENAI_API_KEY}",
+        "baseURL": "{env:AZURE_OPENAI_ENDPOINT}"
+      }
+    },
+    "moonshotai": {
+      "options": {
+        "apiKey": "{env:MOONSHOT_API_KEY}"
+      }
+    },
+    "groq": {
+      "options": {
+        "apiKey": "{env:GROQ_API_KEY}"
+      }
+    },
+    "togetherai": {
+      "options": {
+        "apiKey": "{env:TOGETHER_API_KEY}",
+        "baseURL": "{env:TOGETHER_BASE_URL}"
+      }
+    },
+    "fireworks-ai": {
+      "options": {
+        "apiKey": "{env:FIREWORKS_API_KEY}",
+        "baseURL": "{env:FIREWORKS_BASE_URL}"
+      }
+    },
+    "openrouter": {
+      "options": {
+        "apiKey": "{env:OPENROUTER_API_KEY}",
+        "baseURL": "{env:OPENROUTER_BASE_URL}"
+      }
+    },
+    "ollama": {
+      "options": {
+        "baseURL": "{env:OLLAMA_BASE_URL}"
+      }
+    },
+    "xai": {
+      "options": {
+        "apiKey": "{env:XAI_API_KEY}"
+      }
+    },
+    "zai-coding-plan": {
+      "options": {
+        "apiKey": "{env:ZHIPU_API_KEY}"
+      }
+    },
+    "zhipu": {
+      "options": {
+        "apiKey": "{env:ZHIPU_API_KEY}",
+        "baseURL": "{env:ZHIPU_BASE_URL}"
+      }
+    },
+    "minimax-cn": {
+      "options": {
+        "apiKey": "{env:MINIMAX_API_KEY}"
+      }
+    },
+    "siliconflow-cn": {
+      "options": {
+        "apiKey": "{env:SILICONFLOW_API_KEY}"
+      },
+      "models": {
+        "Pro/MiniMaxAI/MiniMax-M2.5": {
+          "name": "MiniMax-M2.5",
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 192000,
+            "output": 192000
+          }
+        }
+      }
+  }
+  },
+  "tools": {
+    "read": true,
+    "write": true,
+    "edit": true,
+    "bash": true,
+    "glob": true,
+    "grep": true,
+    "ls": true,
+    "todoread": true,
+    "todowrite": true
+  },
+  "mcp": {
+  },
+  "permission": {
+    "*": "allow"
+  }
+}
