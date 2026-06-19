@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML 编辑器</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .toolbar {
+            background: #fff;
+            border-bottom: 1px solid #e0e0e0;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .toolbar-title {
+            font-size: 14px;
+            color: #666;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .toolbar-title strong {
+            color: #333;
+        }
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-primary {
+            background: #4a6cf7;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #3a5ce5;
+        }
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .btn-secondary {
+            background: #e8e8e8;
+            color: #333;
+        }
+        .btn-secondary:hover {
+            background: #ddd;
+        }
+        .btn-success {
+            background: #10b981;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #059669;
+        }
+        .btn-warning {
+            background: #f59e0b;
+            color: white;
+        }
+        .btn-warning:hover {
+            background: #d97706;
+        }
+        .edit-mode-indicator {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .edit-mode-indicator.active {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .edit-mode-indicator.inactive {
+            background: #e5e7eb;
+            color: #6b7280;
+        }
+        .preview-container {
+            flex: 1;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .preview-frame {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 1200px;
+            overflow: hidden;
+        }
+        .preview-frame iframe {
+            width: 100%;
+            height: calc(100vh - 120px);
+            border: none;
+        }
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 24px;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .toast.show {
+            opacity: 1;
+        }
+        .toast.success {
+            background: #10b981;
+        }
+        .toast.error {
+            background: #ef4444;
+        }
+        .toast.info {
+            background: #3b82f6;
+        }
+        .auth-warning {
+            background: #fef3c7;
+            border: 1px solid #f59e0b;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #92400e;
+        }
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <div class="toolbar-title">
+            <strong>HTML 编辑器</strong> - <span id="file-path">加载中...</span>
+        </div>
+        <span id="edit-indicator" class="edit-mode-indicator inactive">预览模式</span>
+        <div id="auth-warning" class="auth-warning" style="display: none;">
+            ⚠️ 未登录，仅可预览
+        </div>
+        <button id="btn-edit" class="btn btn-warning" style="display: none;">
+            ✏️ 编辑模式
+        </button>
+        <button id="btn-preview" class="btn btn-secondary" style="display: none;">
+            👁️ 预览模式
+        </button>
+        <button id="btn-save" class="btn btn-success" style="display: none;">
+            💾 保存
+        </button>
+    </div>
+    
+    <div class="preview-container">
+        <div class="preview-frame">
+            <iframe id="preview-iframe"></iframe>
+        </div>
+    </div>
+    
+    <div id="toast" class="toast"></div>
+
+    <script>
+        // 获取 URL 参数
+        const urlParams = new URLSearchParams(window.location.search);
+        const sessionId = urlParams.get('session');
+        const filePath = urlParams.get('path');
+        
+        // DOM 元素
+        const iframe = document.getElementById('preview-iframe');
+        const filePathEl = document.getElementById('file-path');
+        const editIndicator = document.getElementById('edit-indicator');
+        const authWarning = document.getElementById('auth-warning');
+        const btnEdit = document.getElementById('btn-edit');
+        const btnPreview = document.getElementById('btn-preview');
+        const btnSave = document.getElementById('btn-save');
+        const toast = document.getElementById('toast');
+        
+        // 状态
+        let isEditMode = false;
+        let isAuthenticated = false;
+        let originalContent = '';
+        let currentContent = '';
+        
+        // 显示提示
+        function showToast(message, type = 'info') {
+            toast.textContent = message;
+            toast.className = `toast ${type} show`;
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+        
+        // 检查认证状态
+        function checkAuth() {
+            const token = localStorage.getItem('token');
+            isAuthenticated = !!token;
+            
+            if (isAuthenticated) {
+                btnEdit.style.display = 'inline-flex';
+                authWarning.style.display = 'none';
+            } else {
+                btnEdit.style.display = 'none';
+                authWarning.style.display = 'block';
+            }
+        }
+        
+        // 加载 HTML 内容
+        async function loadContent() {
+            if (!sessionId || !filePath) {
+                showToast('缺少必要参数', 'error');
+                return;
+            }
+            
+            filePathEl.textContent = filePath;
+            document.title = `编辑 - ${filePath.split('/').pop()}`;
+            
+            try {
+                const rawUrl = `/api/files/sandbox/${sessionId}/workspace/raw?path=${encodeURIComponent(filePath)}`;
+                const res = await fetch(rawUrl);
+                if (!res.ok) throw new Error('加载失败');
+                
+                originalContent = await res.text();
+                currentContent = originalContent;
+                
+                // 加载到 iframe
+                renderPreview();
+            } catch (err) {
+                showToast(`加载失败: ${err.message}`, 'error');
+            }
+        }
+        
+        // 渲染预览
+        function renderPreview() {
+            const doc = iframe.contentDocument || iframe.contentWindow.document;
+            
+            // 处理相对路径的图片，转换为 API 路径
+            let processedContent = currentContent;
+            const fileDir = filePath.substring(0, filePath.lastIndexOf('/') + 1);
+            
+            // 替换相对路径图片为 API 路径
+            processedContent = processedContent.replace(
+                /(<img[^>]*\ssrc=["'])(?!https?:\/\/|data:|\/api\/)([^"']+)(["'][^>]*>)/gi,
+                (match, prefix, src, suffix) => {
+                    // 构建完整的 API 路径
+                    const fullPath = fileDir + src;
+                    const apiUrl = `/api/files/sandbox/${sessionId}/workspace/raw?path=${encodeURIComponent(fullPath)}`;
+                    return prefix + apiUrl + suffix;
+                }
+            );
+            
+            doc.open();
+            doc.write(processedContent);
+            doc.close();
+            
+            if (isEditMode) {
+                enableEditMode(doc);
+            }
+        }
+        
+        // 启用编辑模式
+        function enableEditMode(doc) {
+            // 添加编辑样式
+            const style = doc.createElement('style');
+            style.id = 'editor-style';
+            style.textContent = `
+                [contenteditable="true"] {
+                    outline: 2px dashed #4a6cf7 !important;
+                    outline-offset: 2px;
+                    min-height: 1em;
+                }
+                [contenteditable="true"]:hover {
+                    outline-color: #f59e0b !important;
+                    cursor: text;
+                }
+                [contenteditable="true"]:focus {
+                    outline: 2px solid #10b981 !important;
+                    background: rgba(16, 185, 129, 0.05) !important;
+                }
+            `;
+            doc.head.appendChild(style);
+            
+            // 使文字元素可编辑
+            const textElements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, span, div, li, td, th, a, label, button');
+            textElements.forEach(el => {
+                // 只对包含直接文本的元素启用编辑
+                const hasDirectText = Array.from(el.childNodes).some(
+                    node => node.nodeType === Node.TEXT_NODE && node.textContent.trim()
+                );
+                if (hasDirectText || el.children.length === 0) {
+                    el.setAttribute('contenteditable', 'true');
+                }
+            });
+            
+        }
+        
+        // 禁用编辑模式
+        function disableEditMode(doc) {
+            const style = doc.getElementById('editor-style');
+            if (style) style.remove();
+            
+            doc.querySelectorAll('[contenteditable]').forEach(el => {
+                el.removeAttribute('contenteditable');
+            });
+        }
+        
+        // 获取当前内容（保存时调用）
+        function getCurrentContent(doc) {
+            // 克隆文档以避免影响当前编辑状态
+            const clone = doc.documentElement.cloneNode(true);
+            
+            // 移除编辑样式
+            const style = clone.querySelector('#editor-style');
+            if (style) style.remove();
+            
+            // 移除 contenteditable 属性
+            clone.querySelectorAll('[contenteditable]').forEach(el => {
+                el.removeAttribute('contenteditable');
+            });
+            
+            return '<!DOCTYPE html>\n' + clone.outerHTML;
+        }
+        
+        // 切换到编辑模式
+        function switchToEditMode() {
+            isEditMode = true;
+            editIndicator.textContent = '编辑模式';
+            editIndicator.className = 'edit-mode-indicator active';
+            btnEdit.style.display = 'none';
+            btnPreview.style.display = 'inline-flex';
+            btnSave.style.display = 'inline-flex';
+            
+            const doc = iframe.contentDocument || iframe.contentWindow.document;
+            enableEditMode(doc);
+            
+            showToast('已进入编辑模式，点击文字即可编辑', 'info');
+        }
+        
+        // 切换到预览模式
+        function switchToPreviewMode() {
+            // 先保存当前编辑的内容
+            const doc = iframe.contentDocument || iframe.contentWindow.document;
+            currentContent = getCurrentContent(doc);
+            
+            isEditMode = false;
+            editIndicator.textContent = '预览模式';
+            editIndicator.className = 'edit-mode-indicator inactive';
+            btnEdit.style.display = 'inline-flex';
+            btnPreview.style.display = 'none';
+            btnSave.style.display = 'none';
+            
+            // 重新渲染以应用修改
+            renderPreview();
+            
+            showToast('已退出编辑模式', 'info');
+        }
+        
+        // 保存文件
+        async function saveFile() {
+            if (!isAuthenticated) {
+                showToast('请先登录', 'error');
+                return;
+            }
+            
+            const doc = iframe.contentDocument || iframe.contentWindow.document;
+            currentContent = getCurrentContent(doc);
+            
+            btnSave.disabled = true;
+            btnSave.textContent = '保存中...';
+            
+            try {
+                const token = localStorage.getItem('token');
+                const res = await fetch(`/api/files/sandbox/${sessionId}/workspace/content?path=${encodeURIComponent(filePath)}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ content: currentContent })
+                });
+                
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || '保存失败');
+                }
+                
+                originalContent = currentContent;
+                showToast('保存成功！', 'success');
+            } catch (err) {
+                showToast(`保存失败: ${err.message}`, 'error');
+            } finally {
+                btnSave.disabled = false;
+                btnSave.textContent = '💾 保存';
+            }
+        }
+        
+        // 绑定事件
+        btnEdit.addEventListener('click', switchToEditMode);
+        btnPreview.addEventListener('click', switchToPreviewMode);
+        btnSave.addEventListener('click', saveFile);
+        
+        // 初始化
+        checkAuth();
+        loadContent();
+        
+        // 监听 storage 变化（其他标签页登录/登出）
+        window.addEventListener('storage', (e) => {
+            if (e.key === 'token') {
+                checkAuth();
+            }
+        });
+    </script>
+</body>
+</html>
