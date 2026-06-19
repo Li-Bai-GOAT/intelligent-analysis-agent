@@ -43,8 +43,11 @@ COPY routers/__init__.py /agentscope_runtime/routers/__init__.py
 COPY app.py /agentscope_runtime/app.py
 
 # ============= 安装中文字体（系统字体）=============
-# 注：base镜像没有fontconfig，直接复制字体文件即可，matplotlib通过rcParams配置使用
-COPY simhei.ttf /usr/share/fonts/truetype/simhei/simhei.ttf
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends fonts-wqy-zenhei && \
+    mkdir -p /usr/share/fonts/truetype/simhei && \
+    cp /usr/share/fonts/truetype/wqy/wqy-zenhei.ttc /usr/share/fonts/truetype/simhei/simhei.ttf && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ============= 安装数据分析依赖 =============
 # 设置工作目录
@@ -64,8 +67,8 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && 
         statsmodels
 
 # ============= 复制字体到 matplotlib 并清理缓存 =============
-COPY simhei.ttf /agentscope_runtime/venv/lib/python3.11/site-packages/matplotlib/mpl-data/fonts/ttf/simhei.ttf
-RUN rm -rf /root/.cache/matplotlib
+RUN cp /usr/share/fonts/truetype/simhei/simhei.ttf /agentscope_runtime/venv/lib/python3.11/site-packages/matplotlib/mpl-data/fonts/ttf/simhei.ttf && \
+    rm -rf /root/.cache/matplotlib
 
 # ============= Nginx 超时配置 =============
 RUN sed -i 's|proxy_pass http://localhost:8000;|proxy_pass http://localhost:8000;\n            proxy_read_timeout 3600s;\n            proxy_connect_timeout 3600s;\n            proxy_send_timeout 3600s;|g' /etc/nginx/nginx.conf.template
