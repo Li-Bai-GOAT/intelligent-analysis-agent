@@ -122,22 +122,34 @@ async def submit_async_task(
     提交异步分析任务，适用于长时间运行的分析。
     返回 task_id 后，可通过 GET /api/conversation/stream/{task_id} 订阅实时输出。
     """
-    from app.tasks import analyze_task
-    
-    result = analyze_task.delay({
+    import platform
+    from app.tasks import analyze_task, start_local_task, _execute_analyze_task
+    import uuid
+
+    task_id = str(uuid.uuid4())
+    request_dict = {
         "user_id": str(user.id),
         "session_id": data.session_id,
         "message": data.message,
         "file_ids": data.file_ids or [],
-    })
-    
+    }
+
+    # Windows 下使用本地执行器，非 Windows 使用 Celery
+    if platform.system() == "Windows":
+        # 启动本地后台任务（传入函数和参数，避免跨事件循环协程问题）
+        start_local_task(_execute_analyze_task, request_dict, task_id)
+    else:
+        # Celery 异步提交
+        result = analyze_task.delay(request_dict)
+        task_id = result.id
+
     # 记录会话的当前任务
     agent_service = AgentService.get_instance()
     await agent_service.start()
-    await agent_service.set_session_task(data.session_id, result.id)
-    
+    await agent_service.set_session_task(data.session_id, task_id)
+
     return AsyncTaskResponse(
-        task_id=result.id,
+        task_id=task_id,
         session_id=data.session_id,
         status="pending",
     )

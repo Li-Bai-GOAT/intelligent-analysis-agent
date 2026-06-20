@@ -6,7 +6,7 @@ Routers for the data analysis sandbox.
 from .generic import generic_router
 from .mcp import mcp_router
 from .runtime_watcher import watcher_router
-from .workspace import workspace_router
+from .workspace import router as workspace_router
 from .kuncode_stream import router as kuncode_router
 
 __all__ = [

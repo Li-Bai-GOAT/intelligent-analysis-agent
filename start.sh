@@ -46,33 +46,33 @@ check_dependencies() {
     echo -e "\n${BLUE}检查外部依赖...${NC}"
     
     # PostgreSQL
-    if nc -z 100.100.30.61 5488 2>/dev/null; then
-        print_status "PostgreSQL (100.100.30.61:5488) - 可用"
+    if nc -z localhost 5488 2>/dev/null; then
+        print_status "PostgreSQL (localhost:5488) - 可用"
     else
-        print_error "PostgreSQL (100.100.30.61:5488) - 不可用"
+        print_error "PostgreSQL (localhost:5488) - 不可用"
         return 1
     fi
-    
+
     # Redis
-    if nc -z 100.100.30.61 6380 2>/dev/null; then
-        print_status "Redis (100.100.30.61:6380) - 可用"
+    if nc -z localhost 6380 2>/dev/null; then
+        print_status "Redis (localhost:6380) - 可用"
     else
-        print_error "Redis (100.100.30.61:6380) - 不可用"
+        print_error "Redis (localhost:6380) - 不可用"
         return 1
     fi
-    
+
     # Milvus
-    if nc -z 100.100.30.61 19530 2>/dev/null; then
-        print_status "Milvus (100.100.30.61:19530) - 可用"
+    if nc -z localhost 19530 2>/dev/null; then
+        print_status "Milvus (localhost:19530) - 可用"
     else
-        print_warning "Milvus (100.100.30.61:19530) - 不可用（知识库功能受限）"
+        print_warning "Milvus (localhost:19530) - 不可用（知识库功能受限）"
     fi
-    
+
     # Sandbox Server
-    if nc -z 100.100.30.61 10000 2>/dev/null; then
-        print_status "Sandbox Server (100.100.30.61:10000) - 可用"
+    if nc -z localhost 10000 2>/dev/null; then
+        print_status "Sandbox Server (localhost:10000) - 可用"
     else
-        print_error "Sandbox Server (100.100.30.61:10000) - 不可用"
+        print_error "Sandbox Server (localhost:10000) - 不可用"
         return 1
     fi
     

@@ -1389,41 +1389,54 @@ class AgentService:
         await self._redis.delete(key)
     
     async def write_task_stream(self, task_id: str, data: dict, session_id: str = None) -> None:
-        """写入任务流消息，同时刷新会话任务映射的过期时间"""
+        """写入任务流消息 - 使用独立 Redis 连接避免跨进程问题"""
         stream_key = f"task_stream:{task_id}"
-        # maxlen=70000 约保留7万条消息，足够长时间任务的所有输出
-        # 使用 ~ 近似裁剪，性能更好
-        await self._redis.xadd(stream_key, {"data": json.dumps(data, ensure_ascii=False)}, maxlen=70000, approximate=True)
-        await self._redis.expire(stream_key, 3600)
-        
-        # 心跳：每次写入时刷新session_task的过期时间
-        if session_id:
-            session_key = f"session_task:{session_id}"
-            await self._redis.expire(session_key, 3600)  # 续期1小时
+
+        # 创建独立的 Redis 连接，避免 Celery Worker 和 FastAPI 之间的连接冲突
+        redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+
+        try:
+            # maxlen=70000 约保留7万条消息，足够长时间任务的所有输出
+            # 使用 ~ 近似裁剪，性能更好
+            await redis_client.xadd(stream_key, {"data": json.dumps(data, ensure_ascii=False)}, maxlen=70000, approximate=True)
+            await redis_client.expire(stream_key, 3600)
+
+            # 心跳：每次写入时刷新session_task的过期时间
+            if session_id:
+                session_key = f"session_task:{session_id}"
+                await redis_client.expire(session_key, 3600)  # 续期1小时
+        finally:
+            await redis_client.close()
     
     async def read_task_stream(self, task_id: str, last_id: str = "0") -> AsyncGenerator[dict, None]:
-        """读取任务流消息"""
+        """读取任务流消息 - 创建独立的 Redis 连接避免跨进程连接问题"""
         stream_key = f"task_stream:{task_id}"
-        
-        while True:
-            try:
-                messages = await self._redis.xread({stream_key: last_id}, count=10, block=1000)
-                if messages:
-                    for stream_name, stream_messages in messages:
-                        for msg_id, msg_data in stream_messages:
-                            last_id = msg_id
-                            data = json.loads(msg_data.get("data", "{}"))
-                            yield data
-                            if data.get("type") == "end":
-                                return
-                else:
-                    exists = await self._redis.exists(stream_key)
-                    if not exists:
-                        import asyncio
-                        await asyncio.sleep(0.5)
-            except Exception as e:
-                yield {"type": "error", "content": str(e)}
-                return
+
+        # 创建独立的 Redis 连接，避免 Celery Worker 和 FastAPI 之间的连接冲突
+        redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+
+        try:
+            while True:
+                try:
+                    messages = await redis_client.xread({stream_key: last_id}, count=10, block=1000)
+                    if messages:
+                        for stream_name, stream_messages in messages:
+                            for msg_id, msg_data in stream_messages:
+                                last_id = msg_id
+                                data = json.loads(msg_data.get("data", "{}"))
+                                yield data
+                                if data.get("type") == "end":
+                                    return
+                    else:
+                        exists = await redis_client.exists(stream_key)
+                        if not exists:
+                            import asyncio
+                            await asyncio.sleep(0.5)
+                except Exception as e:
+                    yield {"type": "error", "content": str(e)}
+                    return
+        finally:
+            await redis_client.close()
     
     async def _connect_or_create_sandbox(self, session_id: str, user_id: str, file_ids: List[str] = None):
         """
