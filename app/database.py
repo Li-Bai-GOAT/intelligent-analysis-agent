@@ -37,7 +37,23 @@ TORTOISE_ORM = {
 
 
 async def init_db():
-    """初始化数据库连接"""
+    """初始化数据库连接 - 安全处理已有连接"""
+    import gc
+
+    # 强制清理所有现有的数据库连接
+    try:
+        from tortoise import connections
+        # 直接清空连接字典，避免调用 close_all 导致的事件循环问题
+        if hasattr(connections, '_connections'):
+            connections._connections = {}
+        if hasattr(connections, '_inited'):
+            connections._inited = False
+    except Exception:
+        pass
+
+    # 强制垃圾回收
+    gc.collect()
+
     await Tortoise.init(config=TORTOISE_ORM)
     await Tortoise.generate_schemas(safe=True)
 
