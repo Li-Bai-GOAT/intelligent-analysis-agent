@@ -52,3 +52,6 @@ nul
 milvus/
 sandbox_server.env
 test_data.csv
+
+# ==================== 工具生成的临时数据 ====================
+.playwright-mcp/
