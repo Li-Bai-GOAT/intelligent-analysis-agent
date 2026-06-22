@@ -5,7 +5,7 @@ API 依赖项
 
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.models.user import User
@@ -16,22 +16,25 @@ security = HTTPBearer(auto_error=False)
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    token: Optional[str] = Query(None),
 ) -> User:
-    """获取当前登录用户"""
-    if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="未提供认证令牌",
-        )
-    
-    user = await AuthService.get_current_user(credentials.credentials)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的认证令牌",
-        )
-    
-    return user
+    """获取当前登录用户 - 支持 Bearer header 或 query token 参数"""
+    # 优先使用 Authorization header
+    if credentials:
+        user = await AuthService.get_current_user(credentials.credentials)
+        if user:
+            return user
+
+    # 回退到 query token 参数（用于 <img>/<a> 等无法设置 header 的场景）
+    if token:
+        user = await AuthService.get_current_user(token)
+        if user:
+            return user
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="未提供认证令牌",
+    )
 
 
 async def get_optional_user(

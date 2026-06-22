@@ -137,7 +137,7 @@ async def submit_async_task(
     # Windows 下使用本地执行器，非 Windows 使用 Celery
     if platform.system() == "Windows":
         # 启动本地后台任务（传入函数和参数，避免跨事件循环协程问题）
-        start_local_task(_execute_analyze_task, request_dict, task_id)
+        start_local_task(_execute_analyze_task, request_dict, task_id, task_id=task_id)
     else:
         # Celery 异步提交
         result = analyze_task.delay(request_dict)

@@ -83,20 +83,20 @@ def create_app() -> FastAPI:
             "agent_ready": agent_service._started,
         }
     
-    # 静态文件服务
+    # 静态文件服务 (React SPA)
     frontend_dir = Path(__file__).parent.parent / "frontend"
-    if frontend_dir.exists():
-        app.mount("/css", StaticFiles(directory=frontend_dir / "css"), name="css")
-        app.mount("/js", StaticFiles(directory=frontend_dir / "js"), name="js")
-        
-        @app.get("/")
-        async def serve_index():
-            return FileResponse(frontend_dir / "index.html")
-        
-        @app.get("/html-editor.html")
-        async def serve_html_editor():
-            return FileResponse(frontend_dir / "html-editor.html")
-    
+    dist_dir = frontend_dir / "dist"
+
+    if dist_dir.exists():
+        app.mount("/assets", StaticFiles(directory=dist_dir / "assets"), name="assets")
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str):
+            file_path = dist_dir / full_path
+            if file_path.exists() and file_path.is_file():
+                return FileResponse(file_path)
+            return FileResponse(dist_dir / "index.html")
+
     return app
 
 

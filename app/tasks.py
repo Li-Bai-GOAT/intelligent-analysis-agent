@@ -73,14 +73,15 @@ def _run_async(coro):
 # Windows 兼容：本地后台任务执行 (替代 Celery Worker)
 # ============================================================================
 
-def start_local_task(coro_or_func, *args) -> str:
+def start_local_task(coro_or_func, *args, task_id=None) -> str:
     """在 Windows 上启动本地后台任务，返回 task_id
 
     Args:
         coro_or_func: 协程对象或返回协程的异步函数
         *args: 如果传入的是函数，这些是函数的参数
     """
-    task_id = str(uuid.uuid4())
+    if task_id is None:
+        task_id = str(uuid.uuid4())
 
     try:
         # 获取当前正在运行的事件循环（FastAPI 的主循环）
