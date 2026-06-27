@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = ""  # 留空使用默认
     ANTHROPIC_MODEL_NAME: str = "claude-sonnet-4-20250514"
+
+    # Mimo 配置 (OpenAI 兼容)
+    MIMO_API_KEY: str = ""
+    MIMO_BASE_URL: str = "https://token-plan-cn.xiaomimimo.com/v1"
+    MIMO_MODEL_NAME: str = "mimo-v2.5-pro"
     
     # 上下文压缩
     COMPRESS_THRESHOLD_PERCENT: int = 70  # 超过此百分比触发压缩

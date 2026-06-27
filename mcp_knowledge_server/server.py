@@ -88,7 +88,7 @@ def search_knowledge(query: str, category: Optional[str] = None, top_k: int = 3)
 
 
 if __name__ == "__main__":
-    print("🚀 启动 RCA Knowledge MCP Server")
+    print("[OK] RCA Knowledge MCP Server")
     print(f"   地址: http://{MCP_HOST}:{MCP_PORT}/mcp")
     print(f"   类别: {', '.join(CATEGORIES)}")
     mcp.run(transport="http", host=MCP_HOST, port=MCP_PORT)
