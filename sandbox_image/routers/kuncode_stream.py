@@ -8,6 +8,7 @@ KunCode SSE Streaming Router
 
 import asyncio
 import logging
+import os
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -16,6 +17,21 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["kuncode"])
+
+
+def _normalize_model_name(model: Optional[str]) -> Optional[str]:
+    if model == "mimo-v2.5-pro":
+        return "mimo/mimo-v2.5-pro"
+    return model
+
+
+def _normalize_agent_name(agent: Optional[str]) -> Optional[str]:
+    if agent is None:
+        return None
+    normalized = str(agent).strip()
+    if not normalized or normalized.lower() in {"none", "null", "undefined", "default"}:
+        return None
+    return normalized
 
 
 class KunCodeRequest(BaseModel):
@@ -47,11 +63,13 @@ def _build_kuncode_command(request: KunCodeRequest) -> List[str]:
     if request.session_id:
         cmd.extend(["-s", request.session_id])
     
-    if request.agent:
-        cmd.extend(["--agent", request.agent])
+    agent = _normalize_agent_name(request.agent)
+    if agent:
+        cmd.extend(["--agent", agent])
     
-    if request.model:
-        cmd.extend(["-m", request.model])
+    model = _normalize_model_name(request.model)
+    if model:
+        cmd.extend(["-m", model])
     
     if request.files:
         for file_path in request.files:
@@ -81,6 +99,7 @@ async def _stream_kuncode_output(cmd: List[str]):
     """
     import codecs
     import json
+    idle_timeout = int(os.getenv("KUNCODE_STREAM_IDLE_TIMEOUT", "300"))
     
     try:
         process = await asyncio.create_subprocess_exec(
@@ -88,13 +107,26 @@ async def _stream_kuncode_output(cmd: List[str]):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
+        started_message = "[KunCode] process started, waiting for model output...\n"
+        yield f"data: {json.dumps(started_message)}\n\n"
         
         # 使用增量解码器，正确处理多字节 UTF-8 字符
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         
         while True:
             # 读取小块数据
-            chunk = await process.stdout.read(64)
+            try:
+                chunk = await asyncio.wait_for(process.stdout.read(64), timeout=idle_timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                message = (
+                    f"\n[ERROR] KunCode produced no output for {idle_timeout}s "
+                    "and was stopped.\n"
+                )
+                yield f"data: {json.dumps(message)}\n\n"
+                yield f"data: [ERROR] {message.strip()}\n\n"
+                return
             if not chunk:
                 # 处理解码器中剩余的字节
                 remaining = decoder.decode(b"", final=True)
@@ -108,7 +140,12 @@ async def _stream_kuncode_output(cmd: List[str]):
             if text:
                 yield f"data: {json.dumps(text)}\n\n"
         
-        await process.wait()
+        return_code = await process.wait()
+        if return_code != 0:
+            message = f"\n[ERROR] KunCode exited with code {return_code}.\n"
+            yield f"data: {json.dumps(message)}\n\n"
+            yield f"data: [ERROR] {message.strip()}\n\n"
+            return
         
         # 发送完成标记
         yield "data: [DONE]\n\n"

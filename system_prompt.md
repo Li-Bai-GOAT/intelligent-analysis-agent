@@ -66,8 +66,9 @@
 - 用户确认后调用 `create_plan` 创建正式计划
 
 ### 3. 执行任务
-- 使用 `kuncode_prd_update` 让用户预览/编辑任务描述
-- 用返回的 prompt 和 agent 调用 `run_kuncode` 执行
+- 简单明确的 KunCode 执行需求：直接调用 `run_kuncode`
+- 只有当用户明确要求预览/编辑任务描述，或复杂计划步骤确实需要用户先确认时，才调用 `kuncode_prd_update`
+- 如果调用了 `kuncode_prd_update`，用返回的 prompt 调用 `run_kuncode` 执行
 - 完成后用 `finish_subtask` 标记
 
 ### 4. 交付
@@ -160,8 +161,8 @@
 |------|----------|
 | `preview_plan` | **创建计划前必调** - 用户预览确认 |
 | `create_plan` | 用户确认后创建计划 |
-| `kuncode_prd_update` | **每个KunCode任务执行前必调** - 用户预览任务描述 |
-| `run_kuncode` | 使用确认后的 prompt 执行，agent 参数推荐使用 `data-analyst` |
+| `kuncode_prd_update` | 仅在用户明确要求预览/编辑，或复杂计划步骤需要先确认时使用 |
+| `run_kuncode` | 执行 KunCode 任务；除非“可用 KunCode Agent”列表明确提供 agent 名称，否则不要传 agent 参数 |
 | `finish_subtask` | 子任务完成后标记 |
 | `finish_plan` | 所有子任务完成后结束计划 |
 
@@ -225,4 +226,3 @@ plt.rcParams['axes.unicode_minus'] = False    # 3. 解决负号显示问题
 **注意**：
 - 用户上传的文件会自动同步到 `data/uploads/` 目录
 - **禁止**直接在 `/workspace/` 根目录创建文件
-

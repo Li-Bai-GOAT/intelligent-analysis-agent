@@ -82,7 +82,7 @@ class SimpleTokenCounter(TokenCounterBase):
 
 # ==================== 模型提供商类型 ====================
 
-ModelProvider = Literal["deepseek", "minimax", "openai", "anthropic"]
+ModelProvider = Literal["deepseek", "minimax", "openai", "anthropic", "mimo"]
 
 
 # ==================== 模型配置数据类 ====================
@@ -162,8 +162,18 @@ class ModelFactory:
                 stream=True,
                 thinking={"type": "enabled", "budget_tokens": 10000},
             )
+        elif provider == "mimo":
+            return ModelConfig(
+                provider="mimo",
+                model_name=settings.MIMO_MODEL_NAME,
+                api_key=settings.MIMO_API_KEY,
+                base_url=settings.MIMO_BASE_URL,
+                max_tokens=settings.MAX_TOKENS,
+                temperature=settings.MODEL_TEMPERATURE,
+                stream=True,
+            )
         else:
-            raise ValueError(f"不支持的模型提供商: {provider}，支持: deepseek, minimax, openai, anthropic")
+            raise ValueError(f"不支持的模型提供商: {provider}，支持: deepseek, minimax, openai, anthropic, mimo")
     
     @staticmethod
     def create_model(config: Optional[ModelConfig] = None):
@@ -181,12 +191,12 @@ class ModelFactory:
         
         provider = config.provider
         
-        if provider in ("deepseek", "openai"):
-            # DeepSeek 和 OpenAI 使用 OpenAI 兼容 API
+        if provider in ("deepseek", "openai", "mimo"):
+            # DeepSeek、OpenAI 和 Mimo 使用 OpenAI 兼容 API
             client_kwargs = {}
             if config.base_url:
                 client_kwargs["base_url"] = config.base_url
-            
+
             model = OpenAIChatModel(
                 model_name=config.model_name,
                 api_key=config.api_key,
@@ -196,7 +206,7 @@ class ModelFactory:
             )
             logger.info(f"已创建 {provider} 模型: {config.model_name}")
             return model
-        
+
         elif provider in ("minimax", "anthropic"):
             # MiniMax 和 Anthropic 使用 Anthropic 兼容 API
             client_kwargs = {}
@@ -245,16 +255,16 @@ class ModelFactory:
         
         provider = config.provider
         
-        if provider in ("deepseek", "openai"):
+        if provider in ("deepseek", "openai", "mimo"):
             from app.formatters.truncated_formatter import TruncatedDeepSeekFormatter
             formatter = TruncatedDeepSeekFormatter(
                 token_counter=token_counter,
                 max_tokens=max_tokens,
                 tool_output_max_length=tool_output_max_length,
             )
-            logger.debug("已创建 DeepSeek 格式化器")
+            logger.debug(f"已创建 {provider} 格式化器")
             return formatter
-        
+
         elif provider in ("minimax", "anthropic"):
             from app.formatters.anthropic_formatter import TruncatedAnthropicFormatter
             formatter = TruncatedAnthropicFormatter(
@@ -285,8 +295,8 @@ class ModelFactory:
         # Anthropic/MiniMax 使用简单字符计数器（支持 thinking, tool_use 等特殊类型）
         if config.provider in ("anthropic", "minimax"):
             return SimpleTokenCounter()
-        
-        # DeepSeek/OpenAI 使用 OpenAI token 计数器
+
+        # DeepSeek/OpenAI/Mimo 使用 OpenAI token 计数器
         return OpenAITokenCounter(model_name="gpt-4")
     
     @staticmethod

@@ -23,6 +23,15 @@ mkdir -p "$LOG_DIR"
 PID_DIR="$PROJECT_DIR/.pids"
 mkdir -p "$PID_DIR"
 
+# 跨平台 venv 路径检测
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    VENV_PYTHON="$PROJECT_DIR/.venv/Scripts/python"
+    VENV_CELERY="$PROJECT_DIR/.venv/Scripts/celery"
+else
+    VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
+    VENV_CELERY="$PROJECT_DIR/.venv/bin/celery"
+fi
+
 print_header() {
     echo -e "${BLUE}============================================================${NC}"
     echo -e "${BLUE}  数据分析智能体 - 服务管理${NC}"
@@ -42,11 +51,23 @@ print_error() {
 }
 
 # 检查外部依赖
+check_port() {
+    # 跨平台端口检测：优先用 nc，fallback 到 bash /dev/tcp
+    local host=$1 port=$2
+    if command -v nc &>/dev/null; then
+        nc -z "$host" "$port" 2>/dev/null
+    elif command -v powershell &>/dev/null; then
+        powershell -NoProfile -Command "exit !(Test-NetConnection -ComputerName $host -Port $port -WarningAction SilentlyContinue).TcpTestSucceeded" 2>/dev/null
+    else
+        (echo > /dev/tcp/"$host"/"$port") 2>/dev/null
+    fi
+}
+
 check_dependencies() {
     echo -e "\n${BLUE}检查外部依赖...${NC}"
-    
+
     # PostgreSQL
-    if nc -z localhost 5488 2>/dev/null; then
+    if check_port localhost 5488; then
         print_status "PostgreSQL (localhost:5488) - 可用"
     else
         print_error "PostgreSQL (localhost:5488) - 不可用"
@@ -54,7 +75,7 @@ check_dependencies() {
     fi
 
     # Redis
-    if nc -z localhost 6380 2>/dev/null; then
+    if check_port localhost 6380; then
         print_status "Redis (localhost:6380) - 可用"
     else
         print_error "Redis (localhost:6380) - 不可用"
@@ -62,20 +83,20 @@ check_dependencies() {
     fi
 
     # Milvus
-    if nc -z localhost 19530 2>/dev/null; then
+    if check_port localhost 19530; then
         print_status "Milvus (localhost:19530) - 可用"
     else
         print_warning "Milvus (localhost:19530) - 不可用（知识库功能受限）"
     fi
 
     # Sandbox Server
-    if nc -z localhost 10000 2>/dev/null; then
-        print_status "Sandbox Server (localhost:10000) - 可用"
+    if check_port localhost 10001; then
+        print_status "Sandbox Server (localhost:10001) - 可用"
     else
-        print_error "Sandbox Server (localhost:10000) - 不可用"
+        print_error "Sandbox Server (localhost:10001) - 不可用"
         return 1
     fi
-    
+
     return 0
 }
 
@@ -88,7 +109,7 @@ start_mcp_server() {
         return 0
     fi
     
-    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/mcp_knowledge_server/server.py" \
+    nohup "$VENV_PYTHON" "$PROJECT_DIR/mcp_knowledge_server/server.py" \
         > "$LOG_DIR/mcp_server.log" 2>&1 &
     echo $! > "$PID_DIR/mcp.pid"
     
@@ -110,7 +131,7 @@ start_main_server() {
         return 0
     fi
     
-    nohup "$PROJECT_DIR/.venv/bin/python" -m app.main \
+    nohup "$VENV_PYTHON" -m app.main \
         > "$LOG_DIR/main_server.log" 2>&1 &
     echo $! > "$PID_DIR/main.pid"
     
@@ -132,8 +153,12 @@ start_celery_worker() {
         return 0
     fi
     
-    nohup "$PROJECT_DIR/.venv/bin/celery" -A app.tasks worker \
-        -Q rca_tasks --loglevel=info \
+    celery_args=(-A app.tasks worker -Q rca_tasks --loglevel=info)
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+        celery_args+=(--pool=solo --concurrency=1)
+    fi
+
+    nohup "$VENV_CELERY" "${celery_args[@]}" \
         > "$LOG_DIR/celery_worker.log" 2>&1 &
     echo $! > "$PID_DIR/celery.pid"
     

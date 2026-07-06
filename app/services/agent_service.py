@@ -9,6 +9,7 @@ import uuid
 import json
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Optional, AsyncGenerator, Dict, Any, List
 
@@ -90,6 +91,24 @@ def filter_model_tokens(text: str) -> str:
     for token in MODEL_SPECIAL_TOKENS:
         text = text.replace(token, "")
     return text
+
+
+def _should_direct_run_kuncode(message: str) -> bool:
+    normalized = (message or "").lower()
+    return "run_kuncode" in normalized or "kuncode" in normalized
+
+
+def _extract_tool_response_text(response: Any) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return "" if content is None else str(content)
 
 import redis.asyncio as aioredis
 
@@ -278,6 +297,7 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
         """
         
         # 生成预览 ID
+        timeout_seconds = int(os.getenv("KUNCODE_PREVIEW_TIMEOUT_SECONDS", "30"))
         preview_id = str(uuid.uuid4())[:8]
         
         # 创建预览请求并通知前端
@@ -287,6 +307,7 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
             prompt=prompt,
             agent=agent,
             model=None,
+            timeout_seconds=timeout_seconds,
         ))
         
         # 通过队列通知前端显示预览
@@ -296,11 +317,11 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
             "prompt": prompt,
             "agent": agent,
             "model": None,
-            "remaining_seconds": 180,
+            "remaining_seconds": timeout_seconds,
         })
         
         # 等待用户确认（阻塞，3分钟超时后自动继续）
-        result = _run_async(wait_for_kuncode_confirm(session_id, preview_id, timeout=180))
+        result = _run_async(wait_for_kuncode_confirm(session_id, preview_id, timeout=timeout_seconds))
         
         if result.get("action") == "cancel":
             return ToolResponse(
@@ -327,6 +348,13 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
             metadata={"success": True, "prompt": confirmed_prompt, "agent": confirmed_agent, "auto_confirm": is_auto_confirm},
         )
     
+    kuncode_prd_update.__doc__ = (
+        "Preview and optionally edit a KunCode PRD/prompt before execution. "
+        "Use this tool only when the user explicitly asks to preview, edit, or confirm "
+        "the KunCode prompt before running it. For normal requests to run/use/call "
+        "KunCode, call the sandbox run_kuncode tool directly. Do not call this tool "
+        "for simple execution tasks."
+    )
     return kuncode_prd_update
 
 
@@ -500,7 +528,8 @@ async def _build_available_agents_prompt() -> str:
         "",
         "## 可用的 KunCode 智能体",
         "",
-        "调用 `run_kuncode` 时可通过 `agent` 参数指定以下智能体：",
+        "只有下表明确列出的名称才可以作为 `run_kuncode` 的 `agent` 参数。",
+        "如果下表没有任何可用名称，调用 `run_kuncode` 时必须省略 `agent` 参数，不要传 `None`、`default`、`data-analyst` 或自造名称。",
         "",
         "| 名称 | 描述 |",
         "|------|------|",
@@ -509,12 +538,16 @@ async def _build_available_agents_prompt() -> str:
     ]
     
     # 从数据库获取自定义智能体（排除 subagent）
+    has_agents = False
     try:
         agents = await SandboxAgent.filter(enabled=True).exclude(mode="subagent").all()
         for agent in agents:
+            has_agents = True
             lines.append(f"| `{agent.name}` | {agent.description} |")
     except Exception:
         pass  # 数据库未初始化时忽略
+    if not has_agents:
+        lines.append("| （无） | 当前没有可传入 `agent` 参数的 KunCode Agent |")
     
     lines.append("")
     return "\n".join(lines)
@@ -889,6 +922,59 @@ class AgentService:
         
         agent.set_console_output_enabled(enabled=False)
         return agent    
+
+    async def _direct_run_kuncode(
+        self,
+        sandbox,
+        session_id: str,
+        prompt: str,
+    ) -> AsyncGenerator[dict, None]:
+        tool_id = f"run_kuncode_{uuid.uuid4().hex}"
+        yield {
+            "type": "tool_call",
+            "content": "run_kuncode",
+            "tool_id": tool_id,
+            "input": {
+                "prompt": prompt,
+                "agent": None,
+                "model": None,
+                "continue_session": False,
+            },
+        }
+
+        accumulated_output = ""
+        try:
+            async for response in sandbox.run_kuncode(prompt=prompt):
+                output = _extract_tool_response_text(response)
+                if output and output != accumulated_output:
+                    accumulated_output = output
+                    yield {
+                        "type": "tool_result",
+                        "content": accumulated_output,
+                        "tool_id": tool_id,
+                    }
+        except Exception as e:
+            accumulated_output = f"[ERROR] KunCode direct execution failed: {e}"
+            logger.exception("Direct KunCode execution failed: session=%s", session_id)
+            yield {
+                "type": "tool_result",
+                "content": accumulated_output,
+                "tool_id": tool_id,
+            }
+            yield {"type": "error", "content": accumulated_output}
+            return
+
+        if not accumulated_output.strip():
+            message = "[ERROR] KunCode returned no output."
+            yield {"type": "tool_result", "content": message, "tool_id": tool_id}
+            yield {"type": "error", "content": message}
+            return
+
+        if "[ERROR]" in accumulated_output:
+            yield {"type": "error", "content": "KunCode 执行失败，请查看终端输出。"}
+            return
+
+        yield {"type": "text", "content": "KunCode 执行完成，结果已在右侧终端输出。"}
     
     async def chat(
         self,
@@ -979,6 +1065,13 @@ class AgentService:
             if file_paths:
                 file_hint = self._build_file_hint(file_paths)
                 final_message = f"{message}\n\n{file_hint}"
+
+            if _should_direct_run_kuncode(message):
+                async for chunk in self._direct_run_kuncode(sandbox, session_id, final_message):
+                    yield chunk
+                await self._cleanup_session_pending_state(session_id, is_interrupt=False)
+                yield {"type": "end", "content": "对话完成", "session_id": session_id}
+                return
             
             msg = Msg(
                 name="user",
@@ -1077,10 +1170,12 @@ class AgentService:
                                         tool_id = item.get("id", "")
                                         tool_name = item.get("name", "")
                                         tool_input = item.get("input", {})
-                                        # 首次出现或 input 有变化时发送
+                                        # Providers may stream tool input incrementally. Re-emit only
+                                        # when arguments become more complete; the frontend updates the
+                                        # existing entry by tool_id instead of adding a duplicate.
                                         if tool_id:
                                             last_input = sent_tool_inputs.get(tool_id)
-                                            input_changed = last_input != tool_input
+                                            input_changed = tool_input and last_input != tool_input
                                             if tool_id not in sent_tool_ids or input_changed:
                                                 sent_tool_ids.add(tool_id)
                                                 sent_tool_inputs[tool_id] = tool_input

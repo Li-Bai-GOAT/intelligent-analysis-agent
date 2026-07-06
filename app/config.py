@@ -6,6 +6,9 @@
 """
 
 from functools import lru_cache
+from typing import Any
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -17,6 +20,17 @@ class Settings(BaseSettings):
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8090
     DEBUG: bool = False
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_flag(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production"}:
+                return False
+            if normalized in {"debug", "dev", "development"}:
+                return True
+        return value
     
     # PostgreSQL
     DB_ENGINE: str = "postgres"
@@ -65,6 +79,11 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = ""  # 留空使用默认
     ANTHROPIC_MODEL_NAME: str = "claude-sonnet-4-20250514"
+
+    # Mimo 配置 (OpenAI 兼容)
+    MIMO_API_KEY: str = ""
+    MIMO_BASE_URL: str = "https://api.xiaomimimo.com/v1"
+    MIMO_MODEL_NAME: str = "mimo-v2.5-pro"
     
     # 上下文压缩
     COMPRESS_THRESHOLD_PERCENT: int = 70  # 超过此百分比触发压缩
