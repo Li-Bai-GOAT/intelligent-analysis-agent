@@ -14,6 +14,8 @@ ENV PATH="/root/.local/bin:${PATH}"
 ENV KUNCODE_MODEL=""
 ENV DEEPSEEK_API_KEY=""
 ENV DEEPSEEK_BASE_URL=""
+ENV MIMO_API_KEY=""
+ENV MIMO_BASE_URL="https://api.xiaomimimo.com/v1"
 
 # ============= 安装 KunCode（本地离线安装）=============
 COPY kuncode-linux-x64.tar.gz /tmp/

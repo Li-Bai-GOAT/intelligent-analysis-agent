@@ -363,14 +363,23 @@ async def get_sandbox_file_content(
         except UnicodeDecodeError:
             return {"content": None, "binary": True, "size": file_size, "path": path}
     
-    # 其他二进制文件类型
-    binary_extensions = {'.pdf', '.zip', '.tar', '.gz', '.rar', '.7z',
+    # 需要 base64 编码返回的二进制文件类型（前端需要解析内容）
+    base64_binary_extensions = {'.xlsx', '.xls', '.docx', '.doc', '.pptx', '.ppt', '.pdf'}
+    if ext in base64_binary_extensions:
+        import base64
+        with open(target_path, "rb") as f:
+            raw = f.read(max_size)
+        encoded = base64.b64encode(raw).decode("ascii")
+        return {"content": encoded, "binary": True, "size": file_size, "path": path}
+
+    # 其他二进制文件类型（不需要内容，只标记）
+    binary_extensions = {'.zip', '.tar', '.gz', '.rar', '.7z',
                          '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
                          '.mp3', '.mp4', '.avi', '.mov', '.wav', '.flac'}
-    
+
     if ext in binary_extensions:
         return {"content": None, "binary": True, "size": file_size, "path": path}
-    
+
     try:
         with open(target_path, "r", encoding="utf-8") as f:
             if file_size > max_size:
