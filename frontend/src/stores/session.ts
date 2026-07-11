@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { Api } from '../api/client'
 import type { Session, Message, StreamData } from '../types'
+import { useUiStore } from './ui'
 
 function extractContent(content: unknown): string {
   if (content === null || content === undefined) return ''
@@ -371,6 +372,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           msgs.push({ role: 'assistant', content })
         }
         set({ messages: msgs })
+        if (data.generated_files && data.generated_files.length > 0) {
+          useUiStore.getState().setRightTab('files')
+        }
         break
       }
       case 'thinking': {

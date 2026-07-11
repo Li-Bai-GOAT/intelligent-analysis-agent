@@ -50,6 +50,7 @@ export interface StreamData {
   session_id?: string
   phase?: 'started' | 'progress' | 'completed' | 'failed' | 'cancelled'
   execution_status?: 'running' | 'completed' | 'failed' | 'cancelled'
+  generated_files?: string[]
 }
 
 export interface Plan {
