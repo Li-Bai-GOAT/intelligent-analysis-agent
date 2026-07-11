@@ -33,6 +33,7 @@ from app.config import settings
 from app.database import init_db, close_db
 from app.api import api_router
 from app.services.agent_service import AgentService
+from app.services.milvus_bootstrap import ensure_milvus_schema
 
 
 @asynccontextmanager
@@ -41,6 +42,10 @@ async def lifespan(app: FastAPI):
     # 启动数据库
     await init_db()
     print(f"[Database] PostgreSQL 已连接: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+
+    # Knowledge search is optional for chat, so failed bootstrap must not keep
+    # the rest of the application from starting.
+    await asyncio.to_thread(ensure_milvus_schema)
     
     # 启动智能体服务
     agent_service = AgentService.get_instance()

@@ -1,0 +1,58 @@
+"""Idempotent Milvus schema bootstrap used during application startup."""
+
+import logging
+
+from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, connections, db, utility
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+_ALIAS = "rca_bootstrap"
+
+
+def ensure_milvus_schema() -> bool:
+    """Create the configured database and knowledge collection when missing."""
+    endpoint = settings.MILVUS_URI.replace("http://", "").replace("https://", "")
+    host, port = endpoint.rsplit(":", 1) if ":" in endpoint else (endpoint, "19530")
+    user, password = settings.MILVUS_TOKEN.split(":", 1) if ":" in settings.MILVUS_TOKEN else ("root", "Milvus")
+
+    try:
+        connections.connect(
+            alias=_ALIAS,
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            timeout=5,
+        )
+        databases = db.list_database(using=_ALIAS)
+        if settings.MILVUS_DATABASE not in databases:
+            db.create_database(settings.MILVUS_DATABASE, using=_ALIAS)
+            logger.info("Created Milvus database: %s", settings.MILVUS_DATABASE)
+        db.using_database(settings.MILVUS_DATABASE, using=_ALIAS)
+
+        if not utility.has_collection(settings.MILVUS_COLLECTION, using=_ALIAS):
+            schema = CollectionSchema(
+                fields=[
+                    FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=64, is_primary=True),
+                    FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
+                    FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=8192),
+                    FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=64),
+                    FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=settings.MILVUS_DIM),
+                ],
+                description="DataAgent knowledge base",
+                enable_dynamic_field=True,
+            )
+            collection = Collection(settings.MILVUS_COLLECTION, schema=schema, using=_ALIAS)
+            collection.create_index(
+                field_name="embedding",
+                index_params={"metric_type": "COSINE", "index_type": "IVF_FLAT", "params": {"nlist": 128}},
+            )
+            logger.info("Created Milvus collection: %s", settings.MILVUS_COLLECTION)
+        return True
+    except Exception:
+        logger.exception("Milvus bootstrap failed; knowledge features are degraded")
+        return False
+    finally:
+        if connections.has_connection(_ALIAS):
+            connections.disconnect(_ALIAS)
