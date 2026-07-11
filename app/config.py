@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     COMPRESS_MODEL_NAME: str = ""  # 留空则使用对应 provider 的默认模型
     
     # 沙箱
-    SANDBOX_BASE_URL: str = "http://localhost:10000"
+    SANDBOX_BASE_URL: str = "http://localhost:10001"
     SANDBOX_BEARER_TOKEN: str = ""
     
     # JWT

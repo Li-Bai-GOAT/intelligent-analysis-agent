@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, AsyncGenerator, Dict, Any, List
+from datetime import datetime, timezone
 
 
 logger = logging.getLogger(__name__)
@@ -842,13 +843,18 @@ class AgentService:
         # 注册知识库工具
         toolkit.register_tool_function(search_knowledge)
         
-        # 注册沙箱工具
-        sandbox_methods = [
-            sandbox.run_ipython_cell,
-            sandbox.run_shell_command,
-            sandbox.kuncode_session_list,
-            sandbox.kuncode_mcp_list,
-        ]
+        # Register only high-signal sandbox tools by default. Exposing shell and
+        # KunCode inspection helpers to the outer agent makes simple requests
+        # fan out into directory probes/session checks before doing useful work.
+        sandbox_methods = []
+        if os.getenv("ENABLE_AGENT_PYTHON_TOOL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            sandbox_methods.append(sandbox.run_ipython_cell)
+        if os.getenv("ENABLE_AGENT_SHELL_TOOL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            sandbox_methods.extend([
+                sandbox.run_shell_command,
+                sandbox.kuncode_session_list,
+                sandbox.kuncode_mcp_list,
+            ])
         for method in sandbox_methods:
             toolkit.register_tool_function(safe_sandbox_tool_adapter(method))
         
@@ -926,23 +932,71 @@ class AgentService:
     async def _direct_run_kuncode(
         self,
         sandbox,
+        user_id: str,
         session_id: str,
         prompt: str,
+        user_message: str,
+        metadata: Optional[dict] = None,
     ) -> AsyncGenerator[dict, None]:
+        from app.repositories.session_repo import SessionRepository
+
         tool_id = f"run_kuncode_{uuid.uuid4().hex}"
+        tool_input = {
+            "prompt": prompt,
+            "agent": None,
+            "model": None,
+            "continue_session": False,
+        }
+        db_session = await SessionRepository.get(user_id, session_id)
+        if db_session:
+            await SessionRepository.append_message(
+                db_session,
+                {
+                    "id": f"msg_{uuid.uuid4()}",
+                    "type": "message",
+                    "role": "user",
+                    "object": "message",
+                    "status": "completed",
+                    "content": [{"type": "text", "text": prompt}],
+                    "metadata": metadata,
+                },
+            )
+            if not db_session.name and user_message.strip():
+                await SessionRepository.update_name(db_session, user_message.strip()[:100])
+
+            await SessionRepository.append_message(
+                db_session,
+                {
+                    "id": f"msg_{uuid.uuid4()}",
+                    "type": "plugin_call",
+                    "role": "assistant",
+                    "object": "message",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "data",
+                            "data": {
+                                "call_id": tool_id,
+                                "name": "run_kuncode",
+                                "arguments": json.dumps(tool_input, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                },
+            )
+        else:
+            logger.warning("Direct KunCode history skipped: session=%s not found", session_id)
+
         yield {
             "type": "tool_call",
             "content": "run_kuncode",
             "tool_id": tool_id,
-            "input": {
-                "prompt": prompt,
-                "agent": None,
-                "model": None,
-                "continue_session": False,
-            },
+            "input": tool_input,
         }
 
         accumulated_output = ""
+        final_message = ""
+        is_error = False
         try:
             async for response in sandbox.run_kuncode(prompt=prompt):
                 output = _extract_tool_response_text(response)
@@ -955,26 +1009,68 @@ class AgentService:
                     }
         except Exception as e:
             accumulated_output = f"[ERROR] KunCode direct execution failed: {e}"
+            final_message = accumulated_output
+            is_error = True
             logger.exception("Direct KunCode execution failed: session=%s", session_id)
             yield {
                 "type": "tool_result",
                 "content": accumulated_output,
                 "tool_id": tool_id,
             }
-            yield {"type": "error", "content": accumulated_output}
-            return
+        else:
+            if not accumulated_output.strip():
+                accumulated_output = "[ERROR] KunCode returned no output."
+                yield {
+                    "type": "tool_result",
+                    "content": accumulated_output,
+                    "tool_id": tool_id,
+                }
 
-        if not accumulated_output.strip():
-            message = "[ERROR] KunCode returned no output."
-            yield {"type": "tool_result", "content": message, "tool_id": tool_id}
-            yield {"type": "error", "content": message}
-            return
+            is_error = "[ERROR]" in accumulated_output
+            final_message = (
+                "KunCode 执行失败，请查看终端输出。"
+                if is_error
+                else "KunCode 执行完成，结果已在右侧终端输出。"
+            )
 
-        if "[ERROR]" in accumulated_output:
-            yield {"type": "error", "content": "KunCode 执行失败，请查看终端输出。"}
-            return
+        if db_session:
+            output_message = {
+                "id": f"msg_{uuid.uuid4()}",
+                "type": "plugin_call_output",
+                "role": "system",
+                "object": "message",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "data",
+                        "data": {
+                            "call_id": tool_id,
+                            "name": "run_kuncode",
+                            "output": json.dumps(
+                                [{"type": "text", "text": accumulated_output}],
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            }
+            await SessionRepository.insert_after_plugin_call(db_session, tool_id, output_message)
+            await SessionRepository.append_message(
+                db_session,
+                {
+                    "id": f"msg_{uuid.uuid4()}",
+                    "type": "message",
+                    "role": "assistant",
+                    "object": "message",
+                    "status": "completed",
+                    "content": [{"type": "text", "text": final_message}],
+                },
+            )
 
-        yield {"type": "text", "content": "KunCode 执行完成，结果已在右侧终端输出。"}
+        yield {
+            "type": "error" if is_error else "text",
+            "content": final_message,
+        }
     
     async def chat(
         self,
@@ -1067,7 +1163,19 @@ class AgentService:
                 final_message = f"{message}\n\n{file_hint}"
 
             if _should_direct_run_kuncode(message):
-                async for chunk in self._direct_run_kuncode(sandbox, session_id, final_message):
+                metadata = (
+                    {"file_ids": file_ids, "file_paths": file_paths}
+                    if file_ids
+                    else None
+                )
+                async for chunk in self._direct_run_kuncode(
+                    sandbox,
+                    user_id,
+                    session_id,
+                    final_message,
+                    message,
+                    metadata,
+                ):
                     yield chunk
                 await self._cleanup_session_pending_state(session_id, is_interrupt=False)
                 yield {"type": "end", "content": "对话完成", "session_id": session_id}
@@ -1471,6 +1579,29 @@ class AgentService:
         """设置会话的当前任务"""
         key = f"session_task:{session_id}"
         await self._redis.set(key, task_id, ex=3600)  # 1小时过期
+
+    async def set_task_owner(self, task_id: str, user_id: str, session_id: str) -> None:
+        """记录任务所属用户和会话，供 SSE 订阅和重连时鉴权。"""
+        key = f"task_owner:{task_id}"
+        payload = json.dumps(
+            {"user_id": str(user_id), "session_id": session_id},
+            ensure_ascii=False,
+        )
+        await self._redis.set(key, payload, ex=3600)
+
+    async def get_task_owner(self, task_id: str) -> Optional[Dict[str, str]]:
+        """返回任务所属信息；任务流过期后返回 None。"""
+        value = await self._redis.get(f"task_owner:{task_id}")
+        if not value:
+            return None
+        try:
+            data = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            logger.warning("Invalid task ownership record: task=%s", task_id)
+            return None
+        if not isinstance(data, dict) or not data.get("user_id") or not data.get("session_id"):
+            return None
+        return {"user_id": str(data["user_id"]), "session_id": str(data["session_id"])}
     
     async def get_session_task(self, session_id: str) -> str | None:
         """获取会话的当前任务"""
@@ -1486,6 +1617,21 @@ class AgentService:
     async def write_task_stream(self, task_id: str, data: dict, session_id: str = None) -> None:
         """写入任务流消息 - 使用独立 Redis 连接避免跨进程问题"""
         stream_key = f"task_stream:{task_id}"
+        event = dict(data)
+        event_type = event.get("type", "status")
+        phase, execution_status = {
+            "tool_call": ("started", "running"),
+            "tool_result": ("progress", "running"),
+            "error": ("failed", "failed"),
+            "interrupted": ("cancelled", "cancelled"),
+            "end": ("completed", "completed"),
+        }.get(event_type, ("progress", "running"))
+        event.setdefault("event_id", f"evt_{uuid.uuid4().hex}")
+        event.setdefault("task_id", task_id)
+        event.setdefault("session_id", session_id)
+        event.setdefault("phase", phase)
+        event.setdefault("execution_status", execution_status)
+        event.setdefault("created_at", datetime.now(timezone.utc).isoformat())
 
         # 创建独立的 Redis 连接，避免 Celery Worker 和 FastAPI 之间的连接冲突
         redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -1493,13 +1639,14 @@ class AgentService:
         try:
             # maxlen=70000 约保留7万条消息，足够长时间任务的所有输出
             # 使用 ~ 近似裁剪，性能更好
-            await redis_client.xadd(stream_key, {"data": json.dumps(data, ensure_ascii=False)}, maxlen=70000, approximate=True)
+            await redis_client.xadd(stream_key, {"data": json.dumps(event, ensure_ascii=False)}, maxlen=70000, approximate=True)
             await redis_client.expire(stream_key, 3600)
 
             # 心跳：每次写入时刷新session_task的过期时间
             if session_id:
                 session_key = f"session_task:{session_id}"
                 await redis_client.expire(session_key, 3600)  # 续期1小时
+                await redis_client.expire(f"task_owner:{task_id}", 3600)
         finally:
             await redis_client.close()
     
@@ -1519,6 +1666,7 @@ class AgentService:
                             for msg_id, msg_data in stream_messages:
                                 last_id = msg_id
                                 data = json.loads(msg_data.get("data", "{}"))
+                                data["_stream_id"] = msg_id
                                 yield data
                                 if data.get("type") == "end":
                                     return

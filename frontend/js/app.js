@@ -21,6 +21,7 @@ const state = {
         currentToolId: null,
         currentToolName: null,
         currentToolBlock: null,
+        toolNames: new Map(),
         seenToolIds: new Set(),
         terminalCommands: new Set(),
         lastThinkingContent: null,
@@ -458,6 +459,7 @@ async function selectSession(sessionId) {
         currentToolId: null,
         currentToolName: null,
         currentToolBlock: null,
+        toolNames: new Map(),
         seenToolIds: new Set(),
         terminalCommands: new Set(),
         lastThinkingContent: null,
@@ -857,6 +859,7 @@ async function sendAutoContinueMessage(message) {
             if (state.stream.thinkingBlock) {
                 state.stream.thinkingBlock.classList.remove('expanded');
             }
+            finalizeRunningSandboxTools();
             addFinalTerminalPrompt();
             refreshSandboxFiles();
             loadSessions();
@@ -935,6 +938,7 @@ function reconnectToTask(taskId) {
         if (state.stream.thinkingBlock) {
             state.stream.thinkingBlock.classList.remove('expanded');
         }
+        finalizeRunningSandboxTools();
         addFinalTerminalPrompt();
         refreshSandboxFiles();
         loadSessions();
@@ -1139,8 +1143,9 @@ function renderMessages(messages) {
                                 });
                             } else {
                                 // 沙箱工具使用闪电图标
-                                indicator.className = 'sandbox-tool-indicator';
-                                indicator.innerHTML = `<span class="icon">⚡</span><span>${escapeHtml(toolName)}</span>`;
+                                indicator.className = 'sandbox-tool-indicator completed';
+                                indicator.dataset.toolId = callId;
+                                indicator.innerHTML = `<span class="icon">✓</span><span>${escapeHtml(toolName)}</span><span class="status">完成</span>`;
                                 indicator.onclick = () => scrollToTerminalResult(callId);
                             }
                             
@@ -1384,14 +1389,67 @@ function createThinkingBlock(content, expanded = false) {
     return block;
 }
 
+const MARKDOWN_ALLOWED_TAGS = new Set([
+    'a', 'b', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3',
+    'h4', 'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 'strong', 'table',
+    'tbody', 'td', 'th', 'thead', 'tr', 'ul'
+]);
+const MARKDOWN_DROPPED_TAGS = new Set([
+    'embed', 'iframe', 'object', 'script', 'style', 'svg', 'template'
+]);
+
+function sanitizeMarkdownHtml(html) {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const elements = [];
+    const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_ELEMENT);
+    while (walker.nextNode()) elements.push(walker.currentNode);
+
+    for (const element of elements) {
+        const tagName = element.tagName.toLowerCase();
+        if (MARKDOWN_DROPPED_TAGS.has(tagName)) {
+            element.remove();
+            continue;
+        }
+        if (!MARKDOWN_ALLOWED_TAGS.has(tagName)) {
+            element.replaceWith(...Array.from(element.childNodes));
+            continue;
+        }
+
+        for (const attribute of Array.from(element.attributes)) {
+            const name = attribute.name.toLowerCase();
+            const keepClass = name === 'class' && (tagName === 'code' || tagName === 'pre');
+            if (!(tagName === 'a' && name === 'href') && !keepClass) {
+                element.removeAttribute(attribute.name);
+            }
+        }
+
+        if (tagName === 'a') {
+            const href = element.getAttribute('href') || '';
+            try {
+                const url = new URL(href, window.location.origin);
+                if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+                    element.removeAttribute('href');
+                }
+            } catch (e) {
+                element.removeAttribute('href');
+            }
+            element.setAttribute('target', '_blank');
+            element.setAttribute('rel', 'noopener noreferrer');
+        }
+    }
+
+    return template.innerHTML;
+}
+
 function renderMarkdown(text) {
     if (!text) return '';
     try {
         if (typeof marked !== 'undefined') {
-            return marked.parse(text);
+            return sanitizeMarkdownHtml(marked.parse(text));
         }
     } catch (e) {}
-    return escapeHtml(text).replace(/\n/g, '<br>');
+    return sanitizeMarkdownHtml(escapeHtml(text).replace(/\n/g, '<br>'));
 }
 
 
@@ -1412,6 +1470,7 @@ async function createNewSession() {
             currentToolId: null,
             currentToolName: null,
             currentToolBlock: null,
+            toolNames: new Map(),
             seenToolIds: new Set(),
             terminalCommands: new Set(),
             lastThinkingContent: null
@@ -1891,6 +1950,7 @@ async function sendMessage() {
         currentToolId: null,
         currentToolName: null,
         currentToolBlock: null,
+        toolNames: new Map(),
         seenToolIds: new Set(),  // 用于tool_call去重
         terminalCommands: new Set(),  // 用于终端命令去重
         lastThinkingContent: null,
@@ -1936,6 +1996,7 @@ async function sendMessage() {
             if (state.stream.thinkingBlock) {
                 state.stream.thinkingBlock.classList.remove('expanded');
             }
+            finalizeRunningSandboxTools();
             // 流式结束后添加最终prompt
             addFinalTerminalPrompt();
             refreshSandboxFiles();
@@ -2083,6 +2144,8 @@ function handleStreamData(data) {
             // 始终更新当前工具信息，用于后续 tool_result 路由
             s.currentToolId = toolId;
             s.currentToolName = toolName;
+            if (!s.toolNames) s.toolNames = new Map();
+            s.toolNames.set(toolId, toolName);
             
             // preview_plan 特殊处理：流式数据会多次到达，需要累积最新数据
             if (toolName === 'preview_plan' && data.input) {
@@ -2156,9 +2219,9 @@ function handleStreamData(data) {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'tool-indicator-wrapper';
                     const indicator = document.createElement('div');
-                    indicator.className = 'sandbox-tool-indicator';
+                    indicator.className = 'sandbox-tool-indicator running';
                     indicator.dataset.toolId = toolId;
-                    indicator.innerHTML = `<span class="icon">⚡</span><span>${escapeHtml(toolName)}</span>`;
+                    indicator.innerHTML = `<span class="icon">⚡</span><span>${escapeHtml(toolName)}</span><span class="status">运行中</span>`;
                     indicator.onclick = () => scrollToTerminalResult(toolId);
                     wrapper.appendChild(indicator);
                     $('#messages').appendChild(wrapper);
@@ -2194,7 +2257,7 @@ function handleStreamData(data) {
 
         case 'tool_result':
             const resultToolId = data.tool_id || s.currentToolId;
-            let resultToolName = s.currentToolName || '';
+            let resultToolName = (s.toolNames && resultToolId ? s.toolNames.get(resultToolId) : '') || s.currentToolName || '';
             
             // 如果当前没有工具名（重连场景），尝试从DOM查找
             if (!resultToolName && resultToolId) {
@@ -2208,6 +2271,7 @@ function handleStreamData(data) {
             if (SANDBOX_TOOLS.includes(resultToolName)) {
                 // 沙箱工具 - 更新终端输出（使用 resultToolId 确保正确关联）
                 updateTerminalOutputById(resultToolId, data.content);
+                markSandboxToolFinished(resultToolId, data.content);
             } else if (s.currentToolBlock) {
                 // 非沙箱工具 - 更新结果
                 const resultEl = s.currentToolBlock.querySelector('.tool-call-result');
@@ -3483,10 +3547,10 @@ function addTerminalCommand(toolName, inputStr, toolId) {
     
     // 创建输出行
     const outLine = document.createElement('div');
-    outLine.className = 'terminal-line';
+    outLine.className = 'terminal-line terminal-output running';
     outLine.id = `term-out-${toolId}`;
     outLine.dataset.callId = toolId;  // 添加 data-call-id 用于点击定位
-    outLine.innerHTML = '<span class="output"></span>';
+    outLine.innerHTML = '<span class="output"><span class="terminal-running">running...</span></span>';
     terminal.appendChild(outLine);
     
     scrollTerminalToBottom();
@@ -3537,10 +3601,10 @@ function updateTerminalOutputById(toolId, content) {
         const cmdLine = $(`#term-cmd-${toolId}`) || $(`[data-call-id="${toolId}"]`);
         if (cmdLine) {
             outLine = document.createElement('div');
-            outLine.className = 'terminal-line terminal-output';
+            outLine.className = 'terminal-line terminal-output running';
             outLine.id = `term-out-${toolId}`;
             outLine.dataset.callId = toolId;
-            outLine.innerHTML = '<span class="output"></span>';
+            outLine.innerHTML = '<span class="output"><span class="terminal-running">running...</span></span>';
             // 插入到命令行后面
             cmdLine.after(outLine);
         }
@@ -3548,12 +3612,45 @@ function updateTerminalOutputById(toolId, content) {
     }
     
     if (outLine) {
+        outLine.classList.remove('running');
         const outputEl = outLine.querySelector('.output');
         // 去掉末尾的退出码，使用ANSI颜色解析
         const cleanContent = content.replace(/\n\d+$/, '');
         if (outputEl) outputEl.innerHTML = parseAnsiToHtml(cleanContent);
     }
     scrollTerminalToBottom();
+}
+
+function markSandboxToolFinished(toolId, content = '') {
+    if (!toolId) return;
+    const failed = typeof content === 'string' && /\[ERROR\]|traceback|failed|error:/i.test(content);
+    const indicator = $(`.sandbox-tool-indicator[data-tool-id="${toolId}"]`) ||
+                      $(`.sandbox-tool-indicator[data-call-id="${toolId}"]`);
+    if (indicator) {
+        indicator.classList.remove('running');
+        indicator.classList.add(failed ? 'failed' : 'completed');
+        const icon = indicator.querySelector('.icon');
+        const status = indicator.querySelector('.status');
+        if (icon) icon.textContent = failed ? '✕' : '✓';
+        if (status) status.textContent = failed ? '失败' : '完成';
+    }
+
+    const outLine = $(`#term-out-${toolId}`);
+    if (outLine) {
+        outLine.classList.remove('running');
+        outLine.classList.add(failed ? 'failed' : 'completed');
+    }
+}
+
+function finalizeRunningSandboxTools() {
+    $$('.sandbox-tool-indicator.running').forEach(indicator => {
+        const toolId = indicator.dataset.toolId || indicator.dataset.callId;
+        markSandboxToolFinished(toolId, '');
+    });
+    $$('.terminal-output.running').forEach(line => {
+        line.classList.remove('running');
+        line.classList.add('completed');
+    });
 }
 
 // 切换到工具调用tab
@@ -4273,9 +4370,9 @@ function updateAgentContentPreview() {
 }
 
 function renderMarkdownSimple(md) {
-    if (!md) return '<p style="color:#999">预览区域</p>';
+    if (!md) return '<p>预览区域</p>';
     
-    let html = md
+    let html = escapeHtml(md)
         // 代码块
         .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
         // 行内代码
@@ -4303,7 +4400,7 @@ function renderMarkdownSimple(md) {
     html = html.replace(/(<li>.*<\/li>)/gs, '<ul>$1</ul>');
     html = html.replace(/<\/ul>\s*<ul>/g, '');
     
-    return '<p>' + html + '</p>';
+    return sanitizeMarkdownHtml('<p>' + html + '</p>');
 }
 
 function initAgentContentEditor() {
