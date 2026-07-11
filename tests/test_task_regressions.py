@@ -9,7 +9,11 @@ from fastapi import HTTPException
 from app.api.conversation import ChatRequest, _require_session_owner
 from app.api.files import _is_within_workspace
 from app.repositories.session_repo import SessionRepository
-from app.services.agent_service import AgentService
+from app.services.agent_service import (
+    AgentService,
+    _build_kuncode_completion_message,
+    _extract_workspace_files,
+)
 from app.tasks import _local_tasks, start_local_task
 
 
@@ -49,6 +53,15 @@ class FakeSandbox:
 
 
 class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_kuncode_completion_reports_workspace_files(self):
+        files = _extract_workspace_files(
+            "Created /workspace/reports/summary.html and workspace/data/result.csv."
+        )
+        self.assertEqual(files, ["reports/summary.html", "data/result.csv"])
+        message = _build_kuncode_completion_message(files)
+        self.assertIn("`reports/summary.html`", message)
+        self.assertIn("data/result.csv", message)
+
     async def test_execution_mode_is_explicit_and_defaults_to_auto(self):
         request = ChatRequest(message="please explain kuncode", session_id="session-1")
         self.assertEqual(request.execution_mode, "auto")
@@ -147,7 +160,8 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
             ]
 
         self.assertEqual(events[0]["type"], "tool_call")
-        self.assertEqual(events[-1], {"type": "text", "content": "KunCode 执行完成，结果已在右侧终端输出。"})
+        self.assertEqual(events[-1]["type"], "text")
+        self.assertEqual(events[-1]["generated_files"], [])
 
         persisted = [call.args[1] for call in append_message.await_args_list]
         self.assertEqual([message["type"] for message in persisted], ["message", "plugin_call", "message"])

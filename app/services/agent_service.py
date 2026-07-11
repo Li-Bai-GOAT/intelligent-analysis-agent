@@ -10,6 +10,7 @@ import json
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional, AsyncGenerator, Dict, Any, List
 from datetime import datetime, timezone
@@ -105,6 +106,34 @@ def _extract_tool_response_text(response: Any) -> str:
                 parts.append(str(item))
         return "".join(parts)
     return "" if content is None else str(content)
+
+
+_WORKSPACE_FILE_PATTERN = re.compile(r"(?:^|[^\w/])/?workspace/([^\s`'\"<>|]+)")
+
+
+def _extract_workspace_files(output: str) -> list[str]:
+    """Return unique, workspace-relative file paths mentioned by KunCode."""
+    files: list[str] = []
+    for match in _WORKSPACE_FILE_PATTERN.finditer(output or ""):
+        path = match.group(1).rstrip(".,;:)]}")
+        parts = [part for part in path.split("/") if part]
+        if not parts or any(part in {".", ".."} for part in parts):
+            continue
+        normalized = "/".join(parts)
+        if normalized not in files:
+            files.append(normalized)
+    return files
+
+
+def _build_kuncode_completion_message(files: list[str]) -> str:
+    if not files:
+        return "KunCode 已执行完成。请在右上角的“文件”页查看本次会话中的文件。"
+    file_list = "\n".join(f"- `{path}`" for path in files)
+    return (
+        "KunCode 已执行完成，并生成以下文件：\n"
+        f"{file_list}\n\n"
+        "文件已同步到右上角的“文件”页，可在那里打开、预览或下载。"
+    )
 
 import redis.asyncio as aioredis
 
@@ -991,6 +1020,7 @@ class AgentService:
 
         accumulated_output = ""
         final_message = ""
+        generated_files: list[str] = []
         is_error = False
         try:
             async for response in sandbox.run_kuncode(prompt=prompt):
@@ -1022,10 +1052,11 @@ class AgentService:
                 }
 
             is_error = "[ERROR]" in accumulated_output
+            generated_files = _extract_workspace_files(accumulated_output)
             final_message = (
                 "KunCode 执行失败，请查看终端输出。"
                 if is_error
-                else "KunCode 执行完成，结果已在右侧终端输出。"
+                else _build_kuncode_completion_message(generated_files)
             )
 
         if db_session:
@@ -1065,6 +1096,7 @@ class AgentService:
         yield {
             "type": "error" if is_error else "text",
             "content": final_message,
+            "generated_files": generated_files,
         }
     
     async def chat(
