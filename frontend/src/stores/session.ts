@@ -69,7 +69,7 @@ interface SessionState {
   selectSession: (sessionId: string) => Promise<void>
   createSession: () => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
-  sendMessage: (content: string) => Promise<void>
+  sendMessage: (content: string, executionMode?: 'auto' | 'kuncode') => Promise<void>
   addPendingFiles: (files: File[]) => void
   removePendingFile: (index: number) => void
   clearPendingFiles: () => void
@@ -276,7 +276,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string) => {
+  sendMessage: async (content: string, executionMode = 'auto') => {
     const state = get()
     if (!state.currentSession || state.isStreaming) return
 
@@ -303,7 +303,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     try {
       set({ isStreaming: true })
-      const result = await Api.submitTask(state.currentSession, content, fileIds)
+      const result = await Api.submitTask(state.currentSession, content, fileIds, executionMode)
       console.log('[SessionStore] task submitted:', result.task_id)
       const eventSource = Api.streamTask(
         result.task_id,

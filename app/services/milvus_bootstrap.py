@@ -10,21 +10,31 @@ logger = logging.getLogger(__name__)
 _ALIAS = "rca_bootstrap"
 
 
-def ensure_milvus_schema() -> bool:
-    """Create the configured database and knowledge collection when missing."""
+def _connection_parameters() -> dict[str, str | int]:
     endpoint = settings.MILVUS_URI.replace("http://", "").replace("https://", "")
     host, port = endpoint.rsplit(":", 1) if ":" in endpoint else (endpoint, "19530")
     user, password = settings.MILVUS_TOKEN.split(":", 1) if ":" in settings.MILVUS_TOKEN else ("root", "Milvus")
+    return {"host": host, "port": port, "user": user, "password": password, "timeout": 5}
 
+
+def check_milvus_connection() -> bool:
+    """Probe the Milvus protocol, not only whether its TCP port is open."""
+    alias = "rca_readiness"
     try:
-        connections.connect(
-            alias=_ALIAS,
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            timeout=5,
-        )
+        connections.connect(alias=alias, **_connection_parameters())
+        db.list_database(using=alias)
+        return True
+    except Exception:
+        return False
+    finally:
+        if connections.has_connection(alias):
+            connections.disconnect(alias)
+
+
+def ensure_milvus_schema() -> bool:
+    """Create the configured database and knowledge collection when missing."""
+    try:
+        connections.connect(alias=_ALIAS, **_connection_parameters())
         databases = db.list_database(using=_ALIAS)
         if settings.MILVUS_DATABASE not in databases:
             db.create_database(settings.MILVUS_DATABASE, using=_ALIAS)

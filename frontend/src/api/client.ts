@@ -71,11 +71,12 @@ export class Api {
   }
 
   // Async Chat
-  static submitTask(sessionId: string, message: string, fileIds: string[] = []) {
+  static submitTask(sessionId: string, message: string, fileIds: string[] = [], executionMode: 'auto' | 'kuncode' = 'auto') {
     return this.request<{ task_id: string }>('POST', '/conversation/async', {
       session_id: sessionId,
       message,
       file_ids: fileIds,
+      execution_mode: executionMode,
     })
   }
 
@@ -202,6 +203,20 @@ export class Api {
 
   static getSandboxZipDownloadUrl(sessionId: string) {
     return `${API_BASE}/files/sandbox/${sessionId}/workspace/zip`
+  }
+
+  private static async authenticatedBlob(url: string): Promise<Blob> {
+    const response = await fetch(url, { headers: this.headers() })
+    if (!response.ok) throw new Error('文件下载失败')
+    return response.blob()
+  }
+
+  static downloadSandboxFile(sessionId: string, path: string) {
+    return this.authenticatedBlob(this.getSandboxFileDownloadUrl(sessionId, path))
+  }
+
+  static downloadSandboxZip(sessionId: string) {
+    return this.authenticatedBlob(this.getSandboxZipDownloadUrl(sessionId))
   }
 
   // Knowledge

@@ -5,6 +5,7 @@ import { ContextRing } from './ContextRing'
 
 export function InputArea() {
   const [text, setText] = useState('')
+  const [executionMode, setExecutionMode] = useState<'auto' | 'kuncode'>('auto')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { sendMessage, pendingFiles, addPendingFiles, removePendingFile, isStreaming, contextInfo, disconnectStream, currentSession } = useSessionStore()
@@ -18,7 +19,7 @@ export function InputArea() {
 
   const handleSend = () => {
     if (!text.trim() || !currentSession) return
-    sendMessage(text.trim())
+    sendMessage(text.trim(), executionMode)
     setText('')
   }
 
@@ -54,6 +55,11 @@ export function InputArea() {
           ))}
         </div>
       )}
+
+      <div className="mb-2 flex items-center gap-1" role="group" aria-label="执行模式">
+        <button type="button" onClick={() => setExecutionMode('auto')} className={`rounded px-2.5 py-1 text-xs transition-colors ${executionMode === 'auto' ? 'bg-accent text-bg-base' : 'bg-bg-elevated text-text-muted hover:text-text-primary'}`}>自动</button>
+        <button type="button" onClick={() => setExecutionMode('kuncode')} className={`rounded px-2.5 py-1 text-xs transition-colors ${executionMode === 'kuncode' ? 'bg-accent text-bg-base' : 'bg-bg-elevated text-text-muted hover:text-text-primary'}`}>KunCode</button>
+      </div>
 
       <div className="flex items-end gap-2.5">
         <input type="file" ref={fileInputRef} multiple hidden onChange={handleFileSelect} />

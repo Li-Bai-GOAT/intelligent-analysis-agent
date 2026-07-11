@@ -2,14 +2,14 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import * as XLSX from 'xlsx'
 import mammoth from 'mammoth'
 import * as pdfjsLib from 'pdfjs-dist'
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import JSZip from 'jszip'
 import { Api } from '../../api/client'
 import { useSessionStore } from '../../stores/session'
-import { useAuthStore } from '../../stores/auth'
-import { Folder, File, FileText, FileCode, FileSpreadsheet, Download, RefreshCw, ChevronRight, ArrowLeft, ExternalLink } from 'lucide-react'
+import { Folder, File, FileText, FileCode, FileSpreadsheet, Download, RefreshCw, ChevronRight, ArrowLeft } from 'lucide-react'
 
 // pdf.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs`
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker
 
 interface FileItem {
   name: string
@@ -74,25 +74,28 @@ function PptxViewer({ slides }: { slides: string[] }) {
 
 export function FilesPanel() {
   const currentSession = useSessionStore((s) => s.currentSession)
-  const token = useAuthStore((s) => s.token)
   const [files, setFiles] = useState<FileItem[]>([])
   const [currentPath, setCurrentPath] = useState('')
   const [fileContent, setFileContent] = useState<{ name: string; content: string; fullPath: string; isImage?: boolean; isHtml?: boolean; isExcel?: boolean; isWord?: boolean; isPdf?: boolean; isPptx?: boolean; pdfData?: Uint8Array; pptxSlides?: string[]; excelData?: { headers: string[]; rows: (string | number)[][] } } | null>(null)
   const [loading, setLoading] = useState(false)
 
-  // 带 token 的下载 URL（用于 <img> 和 <a> 标签）
-  const getAuthDownloadUrl = (path: string) => {
-    if (!currentSession) return '#'
-    const base = Api.getSandboxFileDownloadUrl(currentSession, path)
-    const separator = base.includes('?') ? '&' : '?'
-    return `${base}${separator}token=${encodeURIComponent(token || '')}`
+  const saveBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(url)
   }
 
-  const getZipDownloadUrl = () => {
-    if (!currentSession) return '#'
-    const base = Api.getSandboxZipDownloadUrl(currentSession)
-    const separator = base.includes('?') ? '&' : '?'
-    return `${base}${separator}token=${encodeURIComponent(token || '')}`
+  const downloadFile = async (path: string, filename: string) => {
+    if (!currentSession) return
+    saveBlob(await Api.downloadSandboxFile(currentSession, path), filename)
+  }
+
+  const downloadZip = async () => {
+    if (!currentSession) return
+    saveBlob(await Api.downloadSandboxZip(currentSession), `workspace_${currentSession.slice(0, 8)}.zip`)
   }
 
   const loadFiles = useCallback(async (path = '') => {
@@ -125,6 +128,13 @@ export function FilesPanel() {
     return () => window.clearTimeout(timer)
   }, [loadFiles])
 
+  useEffect(() => {
+    const objectUrl = fileContent?.isImage ? fileContent.content : null
+    return () => {
+      if (objectUrl?.startsWith('blob:')) URL.revokeObjectURL(objectUrl)
+    }
+  }, [fileContent?.content, fileContent?.isImage])
+
   const viewFile = async (fullPath: string, name: string) => {
     if (!currentSession) return
     const ext = name.split('.').pop()?.toLowerCase()
@@ -139,7 +149,8 @@ export function FilesPanel() {
       // 处理二进制文件（图片等）
       if (data.binary) {
         if (data.image) {
-          setFileContent({ name, content: `[图片文件: ${name}]`, fullPath, isImage: true })
+          const blob = await Api.downloadSandboxFile(currentSession, fullPath)
+          setFileContent({ name, content: URL.createObjectURL(blob), fullPath, isImage: true })
         } else if (isExcel) {
           // Excel 文件：解析并显示为表格
           try {
@@ -270,29 +281,19 @@ export function FilesPanel() {
           </button>
           <span className="text-xs font-medium text-text-primary truncate">{fileContent.name}</span>
           <div className="flex-1" />
-          {fileContent.isHtml && (
-            <a
-              href={getAuthDownloadUrl(fileContent.fullPath)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-text-muted hover:text-accent transition-colors"
-              title="在新页面打开"
-            >
-              <ExternalLink size={14} />
-            </a>
-          )}
-          <a
-            href={getAuthDownloadUrl(fileContent.fullPath)}
+          <button
+            type="button"
+            onClick={() => void downloadFile(fileContent.fullPath, fileContent.name)}
             className="text-text-muted hover:text-accent transition-colors"
-            download
+            title="下载文件"
           >
             <Download size={14} />
-          </a>
+          </button>
         </div>
         {fileContent.isImage ? (
           <div className="flex-1 overflow-auto p-3 flex items-center justify-center bg-bg-base">
             <img
-              src={getAuthDownloadUrl(fileContent.fullPath)}
+              src={fileContent.content}
               alt={fileContent.name}
               className="max-w-full max-h-full object-contain"
             />
@@ -372,14 +373,14 @@ export function FilesPanel() {
           ))}
         </div>
         <div className="flex items-center gap-1">
-          <a
-            href={getZipDownloadUrl()}
+          <button
+            type="button"
+            onClick={() => void downloadZip()}
             className="p-1 text-text-muted hover:text-accent transition-colors"
-            download
             title="下载全部(ZIP)"
           >
             <Download size={14} />
-          </a>
+          </button>
           <button onClick={() => loadFiles(currentPath)} className="p-1 text-text-muted hover:text-accent transition-colors cursor-pointer" title="刷新">
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           </button>

@@ -27,3 +27,8 @@ dependencies = [
     "aerich>=0.7.0",
     "zai-sdk>=0.2.1",
 ]
+
+[tool.aerich]
+tortoise_orm = "app.database.TORTOISE_ORM"
+location = "./migrations"
+src_folder = "./."

@@ -85,7 +85,7 @@ async def _close_task_agent_service(agent_service: AgentService) -> None:
     redis_client = getattr(agent_service, "_redis", None)
     if redis_client:
         try:
-            await redis_client.close()
+            await redis_client.aclose()
         except Exception:
             logger.exception("Failed to close task redis client")
 
@@ -182,6 +182,7 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
     session_id = request_dict.get("session_id")
     message = request_dict.get("message", "")
     file_ids = request_dict.get("file_ids", [])
+    execution_mode = request_dict.get("execution_mode", "auto")
 
     if not message:
         return {"success": False, "error": "未提供任务内容"}
@@ -207,6 +208,7 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
             session_id=session_id,
             message=message,
             file_ids=file_ids,
+            execution_mode=execution_mode,
         ):
             await agent_service.write_task_stream(task_id, chunk, session_id)
             if chunk.get("type") == "end":
@@ -285,7 +287,7 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
         pending["task_id"] = task_id
         await redis.set(key, json.dumps(pending), ex=300)
     finally:
-        await redis.close()
+        await redis.aclose()
 
     logger.info(f"自动继续触发: {session_id}")
 
