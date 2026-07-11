@@ -201,8 +201,8 @@ class ModelFactory:
                 model_name=config.model_name,
                 api_key=config.api_key,
                 client_kwargs=client_kwargs if client_kwargs else None,
-                temperature=config.temperature,
                 stream=config.stream,
+                generate_kwargs={"temperature": config.temperature},
             )
             logger.info(f"已创建 {provider} 模型: {config.model_name}")
             return model

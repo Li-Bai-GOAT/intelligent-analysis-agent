@@ -257,6 +257,19 @@ python scripts/rebuild_milvus_from_postgres.py
 ./start.sh status   # 查看状态
 ```
 
+### Windows PowerShell
+
+先启动 PostgreSQL、Redis 和 Milvus 的 Docker 容器，然后使用原生 PowerShell 脚本管理 Sandbox 与主服务：
+
+```powershell
+.\scripts\start.ps1 -Action up
+.\scripts\start.ps1 -Action status
+.\scripts\start.ps1 -Action logs -Service main
+.\scripts\start.ps1 -Action down
+```
+
+`up` 会等待 `10001` Sandbox 和 `8090/ready` 通过，而不是仅依赖固定延时或进程 PID。
+
 ---
 
 ## 📖 使用示例
