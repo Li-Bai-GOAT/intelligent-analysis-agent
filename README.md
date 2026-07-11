@@ -78,7 +78,7 @@
                                                               │
 ┌─────────────────────────────────────────────────────────────┴───────────┐
 │                   AgentScope Runtime Sandbox Server                      │
-│                           (代码沙箱 :10000)                              │
+│                           (代码沙箱 :10001)                              │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │  DataAnalysisSandbox (自定义沙箱扩展)                             │   │
 │  │  · run_kuncode    → 委派 KunCode AI 执行数据分析任务              │   │
@@ -119,11 +119,11 @@
 
 ## 🎯 技术亮点
 
-### 双 Agent 协作架构
-| Agent | 角色 | 职责 |
-|-------|------|------|
-| **DataPM** | 数据产品经理 | 需求理解、计划制定、任务拆解、质量把控 |
-| **DataAnalyst** | 数据分析师 | 代码实现、数据处理、报告生成、结果输出 |
+### DataPM + KunCode 委派架构
+| 组件 | 角色 | 职责 |
+|------|------|------|
+| **DataPM** | 外层任务协调器 | 需求理解、计划制定、任务拆解、质量把控 |
+| **KunCode** | 沙箱内执行器 | 代码实现、数据处理、报告生成、结果输出 |
 
 ### Human-in-the-Loop (HITL)
 - **计划预览**：复杂任务自动生成分析计划，用户可编辑确认
@@ -296,7 +296,6 @@ python scripts/rebuild_milvus_from_postgres.py
 ├── mcp_knowledge_server/        # MCP 知识库服务
 ├── sandbox_image/               # 沙箱 Docker 镜像配置
 ├── system_prompt.md             # DataPM 系统提示词
-├── analyst_prompt.md            # DataAnalyst 系统提示词
 ├── data_analysis_sandbox.py     # 自定义沙箱扩展
 └── start.sh                     # 服务管理脚本
 ```
@@ -309,6 +308,8 @@ python scripts/rebuild_milvus_from_postgres.py
 |------|------|
 | `.env` | 环境变量 (数据库、API Key、模型配置等) |
 | `sandbox.env` | 沙箱服务配置 |
+
+默认只向外层 Agent 暴露 `run_kuncode`。调试时可通过 `ENABLE_AGENT_PYTHON_TOOL=true` 或 `ENABLE_AGENT_SHELL_TOOL=true` 临时恢复 Python/Shell 工具。
 
 ---
 

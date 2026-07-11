@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional
 from celery import Celery
 
 from app.config import settings
-from app.database import init_db
+from app.database import init_db, close_db
 from app.services.agent_service import AgentService
 
 logger = logging.getLogger(__name__)
@@ -97,14 +97,14 @@ async def _close_task_agent_service(agent_service: AgentService) -> None:
 # Windows 兼容：本地后台任务执行 (替代 Celery Worker)
 # ============================================================================
 
-def start_local_task(coro_or_func, *args) -> str:
+def start_local_task(coro_or_func, *args, task_id: str | None = None) -> str:
     """在 Windows 上启动本地后台任务，返回 task_id
 
     Args:
         coro_or_func: 协程对象或返回协程的异步函数
         *args: 如果传入的是函数，这些是函数的参数
     """
-    task_id = str(uuid.uuid4())
+    task_id = task_id or str(uuid.uuid4())
 
     try:
         # 获取当前正在运行的事件循环（FastAPI 的主循环）
@@ -186,8 +186,15 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
     if not message:
         return {"success": False, "error": "未提供任务内容"}
 
-    await init_db()
-    agent_service = AgentService()
+    # Windows local tasks run inside FastAPI's event loop and must reuse the
+    # application's global ORM pool and AgentService lifecycle. Reinitializing
+    # or closing either resource here breaks the next API request.
+    owns_resources = platform.system() != "Windows"
+    if owns_resources:
+        await init_db()
+        agent_service = AgentService()
+    else:
+        agent_service = AgentService.get_instance()
     await agent_service.start()
 
     try:
@@ -226,12 +233,9 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
             await agent_service.clear_session_task(session_id)
         return {"success": False, "error": str(e)}
     finally:
-        await _close_task_agent_service(agent_service)
-        from tortoise import connections
-        try:
-            await connections.close_all(discard=True)
-        except Exception:
-            pass
+        if owns_resources:
+            await _close_task_agent_service(agent_service)
+            await close_db()
 
 
 def auto_continue_task(session_id: str, user_id: str, preview_id: str, task_id: str = None) -> Dict[str, Any]:
@@ -285,8 +289,12 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
 
     logger.info(f"自动继续触发: {session_id}")
 
-    await init_db()
-    agent_service = AgentService()
+    owns_resources = platform.system() != "Windows"
+    if owns_resources:
+        await init_db()
+        agent_service = AgentService()
+    else:
+        agent_service = AgentService.get_instance()
     await agent_service.start()
 
     try:
@@ -328,9 +336,6 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
             await agent_service.clear_session_task(session_id)
         return {"success": False, "error": str(e)}
     finally:
-        await _close_task_agent_service(agent_service)
-        from tortoise import connections
-        try:
-            await connections.close_all(discard=True)
-        except Exception:
-            pass
+        if owns_resources:
+            await _close_task_agent_service(agent_service)
+            await close_db()

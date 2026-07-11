@@ -80,25 +80,99 @@ class Api {
     }
 
     static streamTask(taskId, onMessage, onDone) {
-        const eventSource = new EventSource(`${API_BASE}/conversation/stream/${taskId}`);
-        eventSource.onmessage = (e) => {
+        // EventSource cannot attach Authorization headers. Fetch streaming keeps
+        // task output behind the same Bearer token as every other API request.
+        const controller = new AbortController();
+        let finished = false;
+        let lastEventId = '0';
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 3;
+
+        const finish = (data) => {
+            if (finished) return;
+            finished = true;
+            onDone(data);
+        };
+
+        const consume = async () => {
             try {
-                const data = JSON.parse(e.data);
-                if (data.type === 'end' || data.type === 'error') {
-                    eventSource.close();
-                    onDone(data);
-                } else {
-                    onMessage(data);
+                const headers = this.headers({ Accept: 'text/event-stream' });
+                if (lastEventId !== '0') headers['Last-Event-ID'] = lastEventId;
+                const response = await fetch(`${API_BASE}/conversation/stream/${taskId}`, {
+                    method: 'GET',
+                    headers,
+                    signal: controller.signal,
+                });
+                if (!response.ok || !response.body) {
+                    let detail = '任务流连接失败';
+                    try {
+                        const body = await response.json();
+                        detail = body.detail || detail;
+                    } catch (err) {}
+                    throw new Error(detail);
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                const handleEvent = (rawEvent) => {
+                    const eventId = rawEvent
+                        .split(/\r?\n/)
+                        .find((line) => line.startsWith('id:'));
+                    if (eventId) lastEventId = eventId.slice(3).trim();
+                    const dataText = rawEvent
+                        .split(/\r?\n/)
+                        .filter((line) => line.startsWith('data:'))
+                        .map((line) => line.slice(5).trimStart())
+                        .join('\n');
+                    if (!dataText || dataText === '[DONE]') return;
+
+                    try {
+                        const data = JSON.parse(dataText);
+                        if (data.type === 'end' || data.type === 'error') {
+                            finish(data);
+                        } else {
+                            onMessage(data);
+                        }
+                    } catch (err) {
+                        console.error('SSE parse error:', err);
+                    }
+                };
+
+                while (!finished) {
+                    const { value, done } = await reader.read();
+                    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+                    const events = buffer.split(/\r?\n\r?\n/);
+                    buffer = events.pop() || '';
+                    events.forEach(handleEvent);
+                    if (done) break;
+                }
+
+                if (!finished && !controller.signal.aborted) {
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts += 1;
+                        await new Promise((resolve) => setTimeout(resolve, reconnectAttempts * 800));
+                        if (!controller.signal.aborted) await consume();
+                    } else {
+                        finish({ type: 'error', content: '任务流意外结束' });
+                    }
                 }
             } catch (err) {
-                console.error('Parse error:', err);
+                if (!controller.signal.aborted) {
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts += 1;
+                        await new Promise((resolve) => setTimeout(resolve, reconnectAttempts * 800));
+                        if (!controller.signal.aborted) await consume();
+                    } else {
+                        finish({ type: 'error', content: err.message || '任务流连接失败' });
+                    }
+                }
             }
         };
-        eventSource.onerror = () => {
-            eventSource.close();
-            onDone({ type: 'error', content: '连接断开' });
-        };
-        return eventSource;
+
+        void consume();
+        return { close: () => controller.abort() };
     }
 
     // Files

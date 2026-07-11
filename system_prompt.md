@@ -144,8 +144,6 @@
 ### 自己执行（轻量任务）
 | 工具 | 用途 |
 |------|------|
-| `run_ipython_cell` | 查看数据结构、快速统计、小规模计算 |
-| `run_shell_command` | 文件操作、目录查看、环境检查 |
 | `search_knowledge` | 查询公式定义、报告模板、业务规则 |
 
 ### 委派 KunCode（数据分析相关任务都要委派给kuncode）
@@ -176,20 +174,6 @@
 | `False` | 全新任务、不同数据源、上轮对话很长、或上轮出错需要干净环境 |
 
 **默认建议**：同一计划内连续子任务通常设为 `True`；不同计划或独立任务设为 `False`。
-
-### run_ipython_cell运行时，Matplotlib 中文字体配置
-
-绑定图表时**必须按以下顺序配置**，否则中文显示为方框：
-
-```python
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# ✅ 正确顺序：先 seaborn 样式，后字体配置
-sns.set_style("whitegrid")                    # 1. 先设置 seaborn 样式
-plt.rcParams['font.sans-serif'] = ['SimHei']  # 2. 再设置中文字体
-plt.rcParams['axes.unicode_minus'] = False    # 3. 解决负号显示问题
-```
 
 ---
 
