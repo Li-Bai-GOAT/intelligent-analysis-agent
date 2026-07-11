@@ -6,7 +6,7 @@
 from datetime import datetime
 from typing import Any, List
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 
@@ -20,8 +20,7 @@ class MessageResponse(BaseModel):
     file_paths: List[str] | None = None  # 文件在沙箱中的路径列表
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SessionResponse(BaseModel):
@@ -34,8 +33,7 @@ class SessionResponse(BaseModel):
     updated_at: datetime
     message_count: int = 0
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ContextInfo(BaseModel):
@@ -53,8 +51,7 @@ class SessionDetailResponse(BaseModel):
     name: str | None = None  # 会话名称
     created_at: datetime
     updated_at: datetime
-    messages: List[MessageResponse] = []
+    messages: List[MessageResponse] = Field(default_factory=list)
     context_info: ContextInfo | None = None  # 上下文使用信息
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

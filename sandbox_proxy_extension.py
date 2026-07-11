@@ -9,6 +9,7 @@ SandboxManager 代理扩展
     runtime-sandbox-server --extension sandbox_proxy_extension.py
 """
 import logging
+import json
 
 import httpx
 from fastapi import Request, HTTPException
@@ -107,16 +108,33 @@ async def _proxy_stream(
     body = await request.body()
     
     async def stream_generator():
-        async with httpx.AsyncClient(timeout=3600.0) as client:
-            async with client.stream(
-                "POST",
-                target_url,
-                headers=headers,
-                content=body,
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    yield line + "\n"
+        try:
+            async with httpx.AsyncClient(timeout=3600.0) as client:
+                async with client.stream(
+                    "POST",
+                    target_url,
+                    headers=headers,
+                    content=body,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        yield line + "\n"
+        except httpx.HTTPStatusError as e:
+            detail = e.response.text[:1000] if e.response is not None else str(e)
+            message = f"[ERROR] Sandbox stream returned HTTP {e.response.status_code}: {detail}"
+            logger.error(message)
+            yield f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
+            yield f"data: {message}\n\n"
+        except httpx.RequestError as e:
+            message = f"[ERROR] Sandbox stream disconnected: {e}"
+            logger.error(message)
+            yield f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
+            yield f"data: {message}\n\n"
+        except Exception as e:
+            message = f"[ERROR] Sandbox stream proxy failed: {e}"
+            logger.exception(message)
+            yield f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
+            yield f"data: {message}\n\n"
     
     return StreamingResponse(
         stream_generator(),

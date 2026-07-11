@@ -6,7 +6,10 @@
 """
 
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from typing import Any
+
+from pydantic import field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -16,7 +19,33 @@ class Settings(BaseSettings):
     APP_NAME: str = "RootCauseAnalysis"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8090
+    ENVIRONMENT: str = "development"
     DEBUG: bool = False
+    CORS_ORIGINS: str = "http://localhost:8090,http://127.0.0.1:8090,http://localhost:5173,http://127.0.0.1:5173"
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_flag(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production"}:
+                return False
+            if normalized in {"debug", "dev", "development"}:
+                return True
+        return value
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        if self.ENVIRONMENT.strip().lower() in {"production", "prod"}:
+            if self.JWT_SECRET == "change-this-in-production":
+                raise ValueError("JWT_SECRET must be configured outside development")
+            if self.DB_AUTO_CREATE_SCHEMA:
+                raise ValueError("DB_AUTO_CREATE_SCHEMA must be false in production; use Aerich migrations")
+        return self
     
     # PostgreSQL
     DB_ENGINE: str = "postgres"
@@ -25,6 +54,7 @@ class Settings(BaseSettings):
     DB_USER: str = "postgres"
     DB_PASSWORD: str = ""
     DB_NAME: str = "rca_agent"
+    DB_AUTO_CREATE_SCHEMA: bool = True
     
     @property
     def DATABASE_URL(self) -> str:
@@ -65,6 +95,11 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = ""  # 留空使用默认
     ANTHROPIC_MODEL_NAME: str = "claude-sonnet-4-20250514"
+
+    # Mimo 配置 (OpenAI 兼容)
+    MIMO_API_KEY: str = ""
+    MIMO_BASE_URL: str = "https://api.xiaomimimo.com/v1"
+    MIMO_MODEL_NAME: str = "mimo-v2.5-pro"
     
     # 上下文压缩
     COMPRESS_THRESHOLD_PERCENT: int = 70  # 超过此百分比触发压缩
@@ -76,7 +111,7 @@ class Settings(BaseSettings):
     COMPRESS_MODEL_NAME: str = ""  # 留空则使用对应 provider 的默认模型
     
     # 沙箱
-    SANDBOX_BASE_URL: str = "http://localhost:10000"
+    SANDBOX_BASE_URL: str = "http://localhost:10001"
     SANDBOX_BEARER_TOKEN: str = ""
     
     # JWT
@@ -99,10 +134,9 @@ class Settings(BaseSettings):
     EMBEDDING_BASE_URL: str = "http://localhost:9997/v1"
     EMBEDDING_MODEL: str = "Qwen3-Embedding-4B"
     EMBEDDING_API_KEY: str = "none"
+    EMBEDDING_ENABLED: bool = False
     
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 @lru_cache

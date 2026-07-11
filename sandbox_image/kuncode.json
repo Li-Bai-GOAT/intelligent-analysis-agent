@@ -1,6 +1,7 @@
 {
   "$schema": "./kuncode.schema.json",
   "model": "{env:KUNCODE_MODEL}",
+  "small_model": "{env:KUNCODE_MODEL}",
   "provider": {
     "openai": {
       "options": {
@@ -88,6 +89,25 @@
     "minimax-cn": {
       "options": {
         "apiKey": "{env:MINIMAX_API_KEY}"
+      }
+    },
+    "mimo": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Mimo",
+      "options": {
+        "apiKey": "{env:MIMO_API_KEY}",
+        "baseURL": "{env:MIMO_BASE_URL}"
+      },
+      "models": {
+        "mimo-v2.5-pro": {
+          "name": "mimo-v2.5-pro",
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 200000,
+            "output": 32000
+          }
+        }
       }
     },
     "siliconflow-cn": {

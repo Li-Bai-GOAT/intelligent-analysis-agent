@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional
 from celery import Celery
 
 from app.config import settings
-from app.database import init_db
+from app.database import init_db, close_db
 from app.services.agent_service import AgentService
 
 logger = logging.getLogger(__name__)
@@ -69,18 +69,42 @@ def _run_async(coro):
         loop.close()
 
 
+async def _close_task_agent_service(agent_service: AgentService) -> None:
+    """Close per-task async resources without releasing shared sandboxes."""
+    for resource in (
+        getattr(agent_service, "cleanup_service", None),
+        getattr(agent_service, "session_service", None),
+        getattr(agent_service, "state_service", None),
+    ):
+        if resource:
+            try:
+                await resource.stop()
+            except Exception:
+                logger.exception("Failed to stop task resource")
+
+    redis_client = getattr(agent_service, "_redis", None)
+    if redis_client:
+        try:
+            await redis_client.aclose()
+        except Exception:
+            logger.exception("Failed to close task redis client")
+
+    agent_service._redis = None
+    agent_service._started = False
+
+
 # ============================================================================
 # Windows 兼容：本地后台任务执行 (替代 Celery Worker)
 # ============================================================================
 
-def start_local_task(coro_or_func, *args) -> str:
+def start_local_task(coro_or_func, *args, task_id: str | None = None) -> str:
     """在 Windows 上启动本地后台任务，返回 task_id
 
     Args:
         coro_or_func: 协程对象或返回协程的异步函数
         *args: 如果传入的是函数，这些是函数的参数
     """
-    task_id = str(uuid.uuid4())
+    task_id = task_id or str(uuid.uuid4())
 
     try:
         # 获取当前正在运行的事件循环（FastAPI 的主循环）
@@ -158,28 +182,42 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
     session_id = request_dict.get("session_id")
     message = request_dict.get("message", "")
     file_ids = request_dict.get("file_ids", [])
+    execution_mode = request_dict.get("execution_mode", "auto")
 
     if not message:
         return {"success": False, "error": "未提供任务内容"}
 
-    await init_db()
-    agent_service = AgentService.get_instance()
+    # Windows local tasks run inside FastAPI's event loop and must reuse the
+    # application's global ORM pool and AgentService lifecycle. Reinitializing
+    # or closing either resource here breaks the next API request.
+    owns_resources = platform.system() != "Windows"
+    if owns_resources:
+        await init_db()
+        agent_service = AgentService()
+    else:
+        agent_service = AgentService.get_instance()
     await agent_service.start()
 
     try:
         await agent_service.write_task_stream(task_id, {"type": "status", "content": "任务开始"}, session_id)
 
         final_result = None
+        saw_end = False
         async for chunk in agent_service.chat(
             user_id=user_id,
             session_id=session_id,
             message=message,
             file_ids=file_ids,
+            execution_mode=execution_mode,
         ):
             await agent_service.write_task_stream(task_id, chunk, session_id)
             if chunk.get("type") == "end":
                 final_result = chunk
                 break
+
+        if final_result is None:
+            final_result = {"type": "end", "content": "任务结束", "session_id": session_id}
+            await agent_service.write_task_stream(task_id, final_result, session_id)
 
         if session_id:
             await agent_service.clear_session_task(session_id)
@@ -197,11 +235,9 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
             await agent_service.clear_session_task(session_id)
         return {"success": False, "error": str(e)}
     finally:
-        from tortoise import connections
-        try:
-            await connections.close_all(discard=True)
-        except Exception:
-            pass
+        if owns_resources:
+            await _close_task_agent_service(agent_service)
+            await close_db()
 
 
 def auto_continue_task(session_id: str, user_id: str, preview_id: str, task_id: str = None) -> Dict[str, Any]:
@@ -251,17 +287,22 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
         pending["task_id"] = task_id
         await redis.set(key, json.dumps(pending), ex=300)
     finally:
-        await redis.close()
+        await redis.aclose()
 
     logger.info(f"自动继续触发: {session_id}")
 
-    await init_db()
-    agent_service = AgentService.get_instance()
+    owns_resources = platform.system() != "Windows"
+    if owns_resources:
+        await init_db()
+        agent_service = AgentService()
+    else:
+        agent_service = AgentService.get_instance()
     await agent_service.start()
 
     try:
         await agent_service.write_task_stream(task_id, {"type": "status", "content": "自动继续执行"}, session_id)
 
+        saw_end = False
         async for chunk in agent_service.chat(
             user_id=user_id,
             session_id=session_id,
@@ -270,7 +311,15 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
         ):
             await agent_service.write_task_stream(task_id, chunk, session_id)
             if chunk.get("type") == "end":
+                saw_end = True
                 break
+
+        if not saw_end:
+            await agent_service.write_task_stream(
+                task_id,
+                {"type": "end", "content": "任务结束", "session_id": session_id},
+                session_id,
+            )
 
         if session_id:
             await agent_service.clear_session_task(session_id)
@@ -289,8 +338,6 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
             await agent_service.clear_session_task(session_id)
         return {"success": False, "error": str(e)}
     finally:
-        from tortoise import connections
-        try:
-            await connections.close_all(discard=True)
-        except Exception:
-            pass
+        if owns_resources:
+            await _close_task_agent_service(agent_service)
+            await close_db()

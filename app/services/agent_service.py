@@ -9,8 +9,10 @@ import uuid
 import json
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Optional, AsyncGenerator, Dict, Any, List
+from datetime import datetime, timezone
 
 
 logger = logging.getLogger(__name__)
@@ -90,6 +92,19 @@ def filter_model_tokens(text: str) -> str:
     for token in MODEL_SPECIAL_TOKENS:
         text = text.replace(token, "")
     return text
+
+
+def _extract_tool_response_text(response: Any) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return "" if content is None else str(content)
 
 import redis.asyncio as aioredis
 
@@ -278,6 +293,7 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
         """
         
         # 生成预览 ID
+        timeout_seconds = int(os.getenv("KUNCODE_PREVIEW_TIMEOUT_SECONDS", "30"))
         preview_id = str(uuid.uuid4())[:8]
         
         # 创建预览请求并通知前端
@@ -287,6 +303,7 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
             prompt=prompt,
             agent=agent,
             model=None,
+            timeout_seconds=timeout_seconds,
         ))
         
         # 通过队列通知前端显示预览
@@ -296,11 +313,11 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
             "prompt": prompt,
             "agent": agent,
             "model": None,
-            "remaining_seconds": 180,
+            "remaining_seconds": timeout_seconds,
         })
         
         # 等待用户确认（阻塞，3分钟超时后自动继续）
-        result = _run_async(wait_for_kuncode_confirm(session_id, preview_id, timeout=180))
+        result = _run_async(wait_for_kuncode_confirm(session_id, preview_id, timeout=timeout_seconds))
         
         if result.get("action") == "cancel":
             return ToolResponse(
@@ -327,6 +344,13 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
             metadata={"success": True, "prompt": confirmed_prompt, "agent": confirmed_agent, "auto_confirm": is_auto_confirm},
         )
     
+    kuncode_prd_update.__doc__ = (
+        "Preview and optionally edit a KunCode PRD/prompt before execution. "
+        "Use this tool only when the user explicitly asks to preview, edit, or confirm "
+        "the KunCode prompt before running it. For normal requests to run/use/call "
+        "KunCode, call the sandbox run_kuncode tool directly. Do not call this tool "
+        "for simple execution tasks."
+    )
     return kuncode_prd_update
 
 
@@ -500,7 +524,8 @@ async def _build_available_agents_prompt() -> str:
         "",
         "## 可用的 KunCode 智能体",
         "",
-        "调用 `run_kuncode` 时可通过 `agent` 参数指定以下智能体：",
+        "只有下表明确列出的名称才可以作为 `run_kuncode` 的 `agent` 参数。",
+        "如果下表没有任何可用名称，调用 `run_kuncode` 时必须省略 `agent` 参数，不要传 `None`、`default`、`data-analyst` 或自造名称。",
         "",
         "| 名称 | 描述 |",
         "|------|------|",
@@ -509,12 +534,16 @@ async def _build_available_agents_prompt() -> str:
     ]
     
     # 从数据库获取自定义智能体（排除 subagent）
+    has_agents = False
     try:
         agents = await SandboxAgent.filter(enabled=True).exclude(mode="subagent").all()
         for agent in agents:
+            has_agents = True
             lines.append(f"| `{agent.name}` | {agent.description} |")
     except Exception:
         pass  # 数据库未初始化时忽略
+    if not has_agents:
+        lines.append("| （无） | 当前没有可传入 `agent` 参数的 KunCode Agent |")
     
     lines.append("")
     return "\n".join(lines)
@@ -591,7 +620,7 @@ class AgentService:
         if self.cleanup_service:
             await self.cleanup_service.stop()
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
         
         self._started = False
         print("[AgentService] 服务已停止")
@@ -809,13 +838,18 @@ class AgentService:
         # 注册知识库工具
         toolkit.register_tool_function(search_knowledge)
         
-        # 注册沙箱工具
-        sandbox_methods = [
-            sandbox.run_ipython_cell,
-            sandbox.run_shell_command,
-            sandbox.kuncode_session_list,
-            sandbox.kuncode_mcp_list,
-        ]
+        # Register only high-signal sandbox tools by default. Exposing shell and
+        # KunCode inspection helpers to the outer agent makes simple requests
+        # fan out into directory probes/session checks before doing useful work.
+        sandbox_methods = []
+        if os.getenv("ENABLE_AGENT_PYTHON_TOOL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            sandbox_methods.append(sandbox.run_ipython_cell)
+        if os.getenv("ENABLE_AGENT_SHELL_TOOL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            sandbox_methods.extend([
+                sandbox.run_shell_command,
+                sandbox.kuncode_session_list,
+                sandbox.kuncode_mcp_list,
+            ])
         for method in sandbox_methods:
             toolkit.register_tool_function(safe_sandbox_tool_adapter(method))
         
@@ -889,6 +923,149 @@ class AgentService:
         
         agent.set_console_output_enabled(enabled=False)
         return agent    
+
+    async def _direct_run_kuncode(
+        self,
+        sandbox,
+        user_id: str,
+        session_id: str,
+        prompt: str,
+        user_message: str,
+        metadata: Optional[dict] = None,
+    ) -> AsyncGenerator[dict, None]:
+        from app.repositories.session_repo import SessionRepository
+
+        tool_id = f"run_kuncode_{uuid.uuid4().hex}"
+        tool_input = {
+            "prompt": prompt,
+            "agent": None,
+            "model": None,
+            "continue_session": False,
+        }
+        db_session = await SessionRepository.get(user_id, session_id)
+        if db_session:
+            await SessionRepository.append_message(
+                db_session,
+                {
+                    "id": f"msg_{uuid.uuid4()}",
+                    "type": "message",
+                    "role": "user",
+                    "object": "message",
+                    "status": "completed",
+                    "content": [{"type": "text", "text": prompt}],
+                    "metadata": metadata,
+                },
+            )
+            if not db_session.name and user_message.strip():
+                await SessionRepository.update_name(db_session, user_message.strip()[:100])
+
+            await SessionRepository.append_message(
+                db_session,
+                {
+                    "id": f"msg_{uuid.uuid4()}",
+                    "type": "plugin_call",
+                    "role": "assistant",
+                    "object": "message",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "data",
+                            "data": {
+                                "call_id": tool_id,
+                                "name": "run_kuncode",
+                                "arguments": json.dumps(tool_input, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                },
+            )
+        else:
+            logger.warning("Direct KunCode history skipped: session=%s not found", session_id)
+
+        yield {
+            "type": "tool_call",
+            "content": "run_kuncode",
+            "tool_id": tool_id,
+            "input": tool_input,
+        }
+
+        accumulated_output = ""
+        final_message = ""
+        is_error = False
+        try:
+            async for response in sandbox.run_kuncode(prompt=prompt):
+                output = _extract_tool_response_text(response)
+                if output and output != accumulated_output:
+                    accumulated_output = output
+                    yield {
+                        "type": "tool_result",
+                        "content": accumulated_output,
+                        "tool_id": tool_id,
+                    }
+        except Exception as e:
+            accumulated_output = f"[ERROR] KunCode direct execution failed: {e}"
+            final_message = accumulated_output
+            is_error = True
+            logger.exception("Direct KunCode execution failed: session=%s", session_id)
+            yield {
+                "type": "tool_result",
+                "content": accumulated_output,
+                "tool_id": tool_id,
+            }
+        else:
+            if not accumulated_output.strip():
+                accumulated_output = "[ERROR] KunCode returned no output."
+                yield {
+                    "type": "tool_result",
+                    "content": accumulated_output,
+                    "tool_id": tool_id,
+                }
+
+            is_error = "[ERROR]" in accumulated_output
+            final_message = (
+                "KunCode 执行失败，请查看终端输出。"
+                if is_error
+                else "KunCode 执行完成，结果已在右侧终端输出。"
+            )
+
+        if db_session:
+            output_message = {
+                "id": f"msg_{uuid.uuid4()}",
+                "type": "plugin_call_output",
+                "role": "system",
+                "object": "message",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "data",
+                        "data": {
+                            "call_id": tool_id,
+                            "name": "run_kuncode",
+                            "output": json.dumps(
+                                [{"type": "text", "text": accumulated_output}],
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            }
+            await SessionRepository.insert_after_plugin_call(db_session, tool_id, output_message)
+            await SessionRepository.append_message(
+                db_session,
+                {
+                    "id": f"msg_{uuid.uuid4()}",
+                    "type": "message",
+                    "role": "assistant",
+                    "object": "message",
+                    "status": "completed",
+                    "content": [{"type": "text", "text": final_message}],
+                },
+            )
+
+        yield {
+            "type": "error" if is_error else "text",
+            "content": final_message,
+        }
     
     async def chat(
         self,
@@ -896,6 +1073,7 @@ class AgentService:
         session_id: Optional[str],
         message: str,
         file_ids: Optional[List[str]] = None,
+        execution_mode: str = "auto",
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         执行对话（流式输出）
@@ -979,6 +1157,25 @@ class AgentService:
             if file_paths:
                 file_hint = self._build_file_hint(file_paths)
                 final_message = f"{message}\n\n{file_hint}"
+
+            if execution_mode == "kuncode":
+                metadata = (
+                    {"file_ids": file_ids, "file_paths": file_paths}
+                    if file_ids
+                    else None
+                )
+                async for chunk in self._direct_run_kuncode(
+                    sandbox,
+                    user_id,
+                    session_id,
+                    final_message,
+                    message,
+                    metadata,
+                ):
+                    yield chunk
+                await self._cleanup_session_pending_state(session_id, is_interrupt=False)
+                yield {"type": "end", "content": "对话完成", "session_id": session_id}
+                return
             
             msg = Msg(
                 name="user",
@@ -1077,10 +1274,12 @@ class AgentService:
                                         tool_id = item.get("id", "")
                                         tool_name = item.get("name", "")
                                         tool_input = item.get("input", {})
-                                        # 首次出现或 input 有变化时发送
+                                        # Providers may stream tool input incrementally. Re-emit only
+                                        # when arguments become more complete; the frontend updates the
+                                        # existing entry by tool_id instead of adding a duplicate.
                                         if tool_id:
                                             last_input = sent_tool_inputs.get(tool_id)
-                                            input_changed = last_input != tool_input
+                                            input_changed = tool_input and last_input != tool_input
                                             if tool_id not in sent_tool_ids or input_changed:
                                                 sent_tool_ids.add(tool_id)
                                                 sent_tool_inputs[tool_id] = tool_input
@@ -1376,6 +1575,29 @@ class AgentService:
         """设置会话的当前任务"""
         key = f"session_task:{session_id}"
         await self._redis.set(key, task_id, ex=3600)  # 1小时过期
+
+    async def set_task_owner(self, task_id: str, user_id: str, session_id: str) -> None:
+        """记录任务所属用户和会话，供 SSE 订阅和重连时鉴权。"""
+        key = f"task_owner:{task_id}"
+        payload = json.dumps(
+            {"user_id": str(user_id), "session_id": session_id},
+            ensure_ascii=False,
+        )
+        await self._redis.set(key, payload, ex=3600)
+
+    async def get_task_owner(self, task_id: str) -> Optional[Dict[str, str]]:
+        """返回任务所属信息；任务流过期后返回 None。"""
+        value = await self._redis.get(f"task_owner:{task_id}")
+        if not value:
+            return None
+        try:
+            data = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            logger.warning("Invalid task ownership record: task=%s", task_id)
+            return None
+        if not isinstance(data, dict) or not data.get("user_id") or not data.get("session_id"):
+            return None
+        return {"user_id": str(data["user_id"]), "session_id": str(data["session_id"])}
     
     async def get_session_task(self, session_id: str) -> str | None:
         """获取会话的当前任务"""
@@ -1391,6 +1613,21 @@ class AgentService:
     async def write_task_stream(self, task_id: str, data: dict, session_id: str = None) -> None:
         """写入任务流消息 - 使用独立 Redis 连接避免跨进程问题"""
         stream_key = f"task_stream:{task_id}"
+        event = dict(data)
+        event_type = event.get("type", "status")
+        phase, execution_status = {
+            "tool_call": ("started", "running"),
+            "tool_result": ("progress", "running"),
+            "error": ("failed", "failed"),
+            "interrupted": ("cancelled", "cancelled"),
+            "end": ("completed", "completed"),
+        }.get(event_type, ("progress", "running"))
+        event.setdefault("event_id", f"evt_{uuid.uuid4().hex}")
+        event.setdefault("task_id", task_id)
+        event.setdefault("session_id", session_id)
+        event.setdefault("phase", phase)
+        event.setdefault("execution_status", execution_status)
+        event.setdefault("created_at", datetime.now(timezone.utc).isoformat())
 
         # 创建独立的 Redis 连接，避免 Celery Worker 和 FastAPI 之间的连接冲突
         redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -1398,15 +1635,16 @@ class AgentService:
         try:
             # maxlen=70000 约保留7万条消息，足够长时间任务的所有输出
             # 使用 ~ 近似裁剪，性能更好
-            await redis_client.xadd(stream_key, {"data": json.dumps(data, ensure_ascii=False)}, maxlen=70000, approximate=True)
+            await redis_client.xadd(stream_key, {"data": json.dumps(event, ensure_ascii=False)}, maxlen=70000, approximate=True)
             await redis_client.expire(stream_key, 3600)
 
             # 心跳：每次写入时刷新session_task的过期时间
             if session_id:
                 session_key = f"session_task:{session_id}"
                 await redis_client.expire(session_key, 3600)  # 续期1小时
+                await redis_client.expire(f"task_owner:{task_id}", 3600)
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
     
     async def read_task_stream(self, task_id: str, last_id: str = "0") -> AsyncGenerator[dict, None]:
         """读取任务流消息 - 创建独立的 Redis 连接避免跨进程连接问题"""
@@ -1424,6 +1662,7 @@ class AgentService:
                             for msg_id, msg_data in stream_messages:
                                 last_id = msg_id
                                 data = json.loads(msg_data.get("data", "{}"))
+                                data["_stream_id"] = msg_id
                                 yield data
                                 if data.get("type") == "end":
                                     return
@@ -1436,7 +1675,7 @@ class AgentService:
                     yield {"type": "error", "content": str(e)}
                     return
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
     
     async def _connect_or_create_sandbox(self, session_id: str, user_id: str, file_ids: List[str] = None):
         """
