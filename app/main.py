@@ -12,7 +12,9 @@ FastAPI 应用入口
 import os
 os.environ.setdefault("RUNTIME_SANDBOX_TIMEOUT", "7200")
 
+import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 from pathlib import Path
@@ -20,7 +22,10 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+import httpx
+import redis.asyncio as aioredis
+from tortoise import connections
 
 # 禁用 watchfiles 的无用日志
 logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
@@ -29,6 +34,7 @@ from app.config import settings
 from app.database import init_db, close_db
 from app.api import api_router
 from app.services.agent_service import AgentService
+from app.services.milvus_bootstrap import check_milvus_connection, ensure_milvus_schema
 
 
 @asynccontextmanager
@@ -37,6 +43,10 @@ async def lifespan(app: FastAPI):
     # 启动数据库
     await init_db()
     print(f"[Database] PostgreSQL 已连接: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+
+    # Knowledge search is optional for chat, so failed bootstrap must not keep
+    # the rest of the application from starting.
+    await asyncio.to_thread(ensure_milvus_schema)
     
     # 启动智能体服务
     agent_service = AgentService.get_instance()
@@ -64,38 +74,116 @@ def create_app() -> FastAPI:
     # CORS
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def attach_request_id(request, call_next):
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
     
     # 注册 API 路由
     app.include_router(api_router)
     
-    # 健康检查
-    @app.get("/health")
-    async def health():
+    @app.get("/live")
+    async def live():
+        """Process liveness without probing external dependencies."""
         agent_service = AgentService.get_instance()
         return {
             "status": "ok",
             "service": "rca-agent",
             "agent_ready": agent_service._started,
         }
+
+    # Preserve the existing endpoint as a backwards-compatible liveness check.
+    @app.get("/health")
+    async def health():
+        return await live()
+
+    @app.get("/ready")
+    async def ready():
+        """Report whether required runtime dependencies can serve requests."""
+        dependencies: dict[str, str] = {}
+
+        try:
+            connection = connections.get("default")
+            await connection.execute_query("SELECT 1")
+            dependencies["postgres"] = "ok"
+        except Exception:
+            dependencies["postgres"] = "unavailable"
+
+        redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await redis_client.ping()
+            dependencies["redis"] = "ok"
+        except Exception:
+            dependencies["redis"] = "unavailable"
+        finally:
+            await redis_client.aclose()
+
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                response = await client.get(f"{settings.SANDBOX_BASE_URL.rstrip('/')}/docs")
+                response.raise_for_status()
+            dependencies["sandbox"] = "ok"
+        except Exception:
+            dependencies["sandbox"] = "unavailable"
+
+        dependencies["milvus"] = (
+            "ok" if await asyncio.to_thread(check_milvus_connection) else "degraded"
+        )
+
+        if settings.EMBEDDING_ENABLED:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    response = await client.get(
+                        f"{settings.EMBEDDING_BASE_URL.rstrip('/')}/models",
+                        headers={"Authorization": f"Bearer {settings.EMBEDDING_API_KEY}"},
+                    )
+                    response.raise_for_status()
+                dependencies["embedding"] = "ok"
+            except Exception:
+                dependencies["embedding"] = "degraded"
+        else:
+            dependencies["embedding"] = "disabled"
+
+        required = ("postgres", "redis", "sandbox")
+        is_ready = all(dependencies[name] == "ok" for name in required)
+        return JSONResponse(
+            status_code=200 if is_ready else 503,
+            content={
+                "status": "ok" if is_ready else "unavailable",
+                "dependencies": dependencies,
+            },
+        )
     
-    # 静态文件服务
+    # React production build. API routes are registered before this catch-all,
+    # so /api, /docs and /health continue to resolve to FastAPI handlers.
     frontend_dir = Path(__file__).parent.parent / "frontend"
-    if frontend_dir.exists():
-        app.mount("/css", StaticFiles(directory=frontend_dir / "css"), name="css")
-        app.mount("/js", StaticFiles(directory=frontend_dir / "js"), name="js")
-        
-        @app.get("/")
-        async def serve_index():
-            return FileResponse(frontend_dir / "index.html")
-        
-        @app.get("/html-editor.html")
-        async def serve_html_editor():
-            return FileResponse(frontend_dir / "html-editor.html")
+    dist_dir = frontend_dir / "dist"
+    if dist_dir.exists() and (dist_dir / "index.html").exists():
+        assets_dir = dist_dir / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def serve_spa(full_path: str):
+            requested_file = dist_dir / full_path
+            if full_path and requested_file.is_file():
+                return FileResponse(requested_file)
+            return FileResponse(dist_dir / "index.html")
+    else:
+        @app.get("/", include_in_schema=False)
+        async def frontend_not_built():
+            return {
+                "detail": "Frontend build is missing. Run `cd frontend && npm run build`.",
+            }
     
     return app
 

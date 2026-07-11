@@ -174,7 +174,7 @@ async def get_pending_kuncode(
             "subtasks": preview.get("subtasks"),
         }
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 @router.post("/{session_id}/confirm/{preview_id}", summary="确认或取消 Kuncode 执行")
@@ -235,7 +235,7 @@ async def confirm_kuncode(
             "preview_id": preview_id,
         }
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 class PlanConfirmRequest(BaseModel):
@@ -379,7 +379,7 @@ async def create_kuncode_preview(
         await redis.set(preview_key, json.dumps(preview_data), ex=3600)
         await redis.set(pending_key, preview_id, ex=3600)
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def save_kuncode_to_history(
@@ -495,7 +495,7 @@ async def wait_for_kuncode_confirm(
         
         return {"action": "auto_confirm", "prompt": original_prompt, "agent": original_agent, "timeout": True}
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 # ==================== Plan Preview Functions ====================
@@ -533,7 +533,7 @@ async def create_plan_preview(
         await redis.set(preview_key, json.dumps(preview_data), ex=3600)
         await redis.set(pending_key, preview_id, ex=3600)
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def wait_for_plan_confirm(
@@ -600,7 +600,7 @@ async def wait_for_plan_confirm(
             
             await asyncio.sleep(0.5)
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def confirm_plan_preview(
@@ -643,7 +643,7 @@ async def confirm_plan_preview(
                 except Exception:
                     pass
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 # ==================== Auto Continue Functions ====================
@@ -686,7 +686,7 @@ async def create_auto_continue_pending(
         
         return preview_id
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def _mark_plan_subtasks_abandoned(session_id: str, user_id: str) -> None:
@@ -745,7 +745,7 @@ async def _mark_plan_subtasks_skipped(session_id: str) -> None:
         if not user_id:
             return
     finally:
-        await redis.close()
+        await redis.aclose()
     
     # 调用通用函数
     await _mark_plan_subtasks_abandoned(session_id, user_id)
@@ -774,7 +774,7 @@ async def confirm_auto_continue(
         if action == "cancel":
             await _mark_plan_subtasks_skipped(session_id)
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def clear_auto_continue_pending(session_id: str) -> None:
@@ -784,7 +784,7 @@ async def clear_auto_continue_pending(session_id: str) -> None:
         key = _get_auto_continue_key(session_id)
         await redis.delete(key)
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def reset_auto_continue_timer(session_id: str) -> bool:
@@ -825,7 +825,7 @@ async def reset_auto_continue_timer(session_id: str) -> bool:
         
         return True
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def reset_preview_timer(session_id: str) -> bool:
@@ -865,7 +865,7 @@ async def reset_preview_timer(session_id: str) -> bool:
         
         return True
     finally:
-        await redis.close()
+        await redis.aclose()
 
 
 async def update_plan_preview_content(
@@ -908,4 +908,4 @@ async def update_plan_preview_content(
         
         return True
     finally:
-        await redis.close()
+        await redis.aclose()

@@ -170,6 +170,33 @@ class SandboxInjectionService:
             logger.error(f"执行命令失败: {e}")
             return -1, str(e)
     
+    def _ensure_mimo_provider(self, kuncode_config: dict) -> None:
+        """Ensure KunCode can use Mimo through an OpenAI-compatible provider."""
+        if kuncode_config.get("model") == "mimo-v2.5-pro":
+            kuncode_config["model"] = "mimo/mimo-v2.5-pro"
+        kuncode_config.setdefault("small_model", kuncode_config.get("model", "{env:KUNCODE_MODEL}"))
+
+        providers = kuncode_config.setdefault("provider", {})
+        providers["mimo"] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Mimo",
+            "options": {
+                "apiKey": "{env:MIMO_API_KEY}",
+                "baseURL": "{env:MIMO_BASE_URL}",
+            },
+            "models": {
+                "mimo-v2.5-pro": {
+                    "name": "mimo-v2.5-pro",
+                    "tool_call": True,
+                    "temperature": True,
+                    "limit": {
+                        "context": 200000,
+                        "output": 32000,
+                    },
+                },
+            },
+        }
+
     async def inject_agents(self, container_id: str) -> dict:
         """
         注入所有启用的 Agent 配置到容器
@@ -291,6 +318,8 @@ class SandboxInjectionService:
             kuncode_config = {"mcp": {}, "permission": {"*": "allow"}}
         else:
             kuncode_config = json.loads(output)
+
+        self._ensure_mimo_provider(kuncode_config)
         
         # 更新 MCP 配置（仅合并，不覆盖其他字段）
         if "mcp" not in kuncode_config:

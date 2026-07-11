@@ -34,9 +34,11 @@ def _load_env_file():
     # 尝试多个可能的路径
     possible_paths = [
         Path(__file__).parent / "sandbox.env",
+        Path(__file__).parent / ".env",
     ]
     try:
         possible_paths.append(Path.cwd() / "sandbox.env")
+        possible_paths.append(Path.cwd() / ".env")
     except OSError:
         pass
     for env_path in possible_paths:
@@ -50,7 +52,6 @@ def _load_env_file():
                         value = value.strip().strip('"').strip("'")
                         if key and value and not os.environ.get(key):
                             os.environ[key] = value
-            break
 _load_env_file()
 from agentscope_runtime.sandbox.utils import build_image_uri  # noqa: E402
 from agentscope_runtime.sandbox.registry import SandboxRegistry  # noqa: E402
@@ -152,6 +153,7 @@ class StreamingClient:
                                 return
                             if content.startswith("[ERROR]"):
                                 logger.error(f"SSE Error: {content}")
+                                yield content
                                 return
                             # JSON 解码恢复换行符等特殊字符
                             try:
@@ -200,6 +202,7 @@ class StreamingClient:
                                 return
                             if content.startswith("[ERROR]"):
                                 logger.error(f"SSE Error: {content}")
+                                yield content
                                 return
                             # JSON 解码恢复换行符等特殊字符
                             try:
@@ -220,6 +223,44 @@ KUNCODE_IN_CODE_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL
 )
 
+KUNCODE_FAILURE_PATTERNS = (
+    "api key is invalid",
+    "unauthorized",
+    "forbidden",
+    "authentication",
+    "[error]",
+    "error:",
+    "traceback",
+    "failed",
+    "exited with code",
+    "was stopped",
+)
+
+
+def _is_kuncode_failure(output: str) -> bool:
+    lowered = output.lower()
+    return any(pattern in lowered for pattern in KUNCODE_FAILURE_PATTERNS)
+
+
+def _append_kuncode_failure_hint(output: str) -> str:
+    if not output.strip():
+        output = "[ERROR] KunCode returned no output."
+    hint = (
+        "\n[ERROR] KunCode execution failed. "
+        "Check the configured agent, model, provider API key, and sandbox KunCode config."
+    )
+    return output if hint in output else output + hint
+
+
+def _normalize_kuncode_agent(agent: Optional[str]) -> Optional[str]:
+    if agent is None:
+        return None
+    normalized = str(agent).strip()
+    if not normalized or normalized.lower() in {"none", "null", "undefined", "default"}:
+        return None
+    return normalized
+
+
 @SandboxRegistry.register(
     build_image_uri(f"runtime-sandbox-{SANDBOX_TYPE}"),
     sandbox_type=SANDBOX_TYPE,
@@ -228,7 +269,7 @@ KUNCODE_IN_CODE_PATTERN = re.compile(
     description="Data Analysis Sandbox with KunCode AI (pandas, numpy, matplotlib, seaborn, scikit-learn)",
     environment={
         # KunCode 模型配置
-        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "minimax-cn/MiniMax-M2.5"),
+        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.5-pro"),
         # MiniMax
         "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
         # DeepSeek
@@ -243,6 +284,9 @@ KUNCODE_IN_CODE_PATTERN = re.compile(
         # OpenAI
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
         "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", ""),
+        # Mimo (OpenAI-compatible)
+        "MIMO_API_KEY": os.getenv("MIMO_API_KEY", ""),
+        "MIMO_BASE_URL": os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1"),
         # 硅基流动
         "SILICONFLOW_API_KEY": os.getenv("SILICONFLOW_API_KEY", "")
     },
@@ -376,7 +420,7 @@ class DataAnalysisSandbox(Sandbox):
         # 构建请求参数
         request_data = {
             "prompt": prompt,
-            "agent": agent,
+            "agent": _normalize_kuncode_agent(agent),
             "model": model,
             "files": files,
             "continue_session": continue_session,
@@ -407,6 +451,9 @@ class DataAnalysisSandbox(Sandbox):
             logger.exception("KunCode SSE streaming failed")
             error_msg = f"\n[ERROR] {str(e)}"
             accumulated_output += error_msg
+            has_error = True
+        if _is_kuncode_failure(accumulated_output):
+            accumulated_output = _append_kuncode_failure_hint(accumulated_output)
             has_error = True
         # 最后一个 chunk 标记 is_last=True，包含完整累积内容
         yield ToolResponse(
@@ -448,7 +495,7 @@ class DataAnalysisSandbox(Sandbox):
     description="Data Analysis Sandbox with KunCode AI (Async)",
     environment={
         # KunCode 模型配置
-        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "minimax-cn/MiniMax-M2.5"),
+        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.5-pro"),
         # MiniMax
         "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
         # DeepSeek
@@ -463,6 +510,9 @@ class DataAnalysisSandbox(Sandbox):
         # OpenAI
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
         "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", ""),
+        # Mimo (OpenAI-compatible)
+        "MIMO_API_KEY": os.getenv("MIMO_API_KEY", ""),
+        "MIMO_BASE_URL": os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1"),
         # 硅基流动
         "SILICONFLOW_API_KEY": os.getenv("SILICONFLOW_API_KEY", "")
     },
@@ -594,7 +644,7 @@ class DataAnalysisSandboxAsync(SandboxAsync):
         # 构建请求参数
         request_data = {
             "prompt": prompt,
-            "agent": agent,
+            "agent": _normalize_kuncode_agent(agent),
             "model": model,
             "files": files,
             "continue_session": continue_session,
@@ -618,10 +668,13 @@ class DataAnalysisSandboxAsync(SandboxAsync):
         except Exception as e:
             logger.exception("KunCode SSE streaming failed")
             accumulated_output += f"\n[ERROR] {str(e)}"
+        has_error = _is_kuncode_failure(accumulated_output)
+        if has_error:
+            accumulated_output = _append_kuncode_failure_hint(accumulated_output)
         # 最终 yield
         yield ToolResponse(
             content=[{"type": "text", "text": accumulated_output}],
-            metadata={"success": "[ERROR]" not in accumulated_output},
+            metadata={"success": not has_error},
             stream=True,
             is_last=True,
         )

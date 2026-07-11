@@ -12,7 +12,10 @@
 - Celery 任务（如果有）
 """
 
+import json
 import logging
+import shutil
+from pathlib import Path
 import redis.asyncio as aioredis
 
 from app.config import settings
@@ -54,6 +57,61 @@ class SessionCleanupService:
         }
         
         logger.info(f"开始清理会话: {session_id} (用户: {user_id})")
+
+        binding = await SandboxBinding.filter(user_id=user_id, session_id=session_id).first()
+        user_files = await UserFile.filter(user_id=user_id, session_id=session_id).all()
+
+        # Release the actual runtime container before removing its binding.
+        if binding:
+            try:
+                from app.services.agent_service import AgentService
+
+                agent_service = AgentService.get_instance()
+                if agent_service.sandbox_service:
+                    agent_service.sandbox_service.release(session_id)
+                result["deleted"]["sandbox_runtime"] = 1
+            except Exception as e:
+                result["errors"].append(f"释放沙箱容器失败: {e}")
+                logger.error("释放沙箱容器失败 %s: %s", session_id, e)
+
+        # Physical deletion is restricted to project-owned data roots.
+        project_root = Path(__file__).resolve().parents[2]
+        allowed_roots = [
+            project_root / "user_uploads",
+            project_root / "sessions_mount_dir",
+        ]
+
+        def remove_owned_path(raw_path: str | None, recursive: bool = False) -> bool:
+            if not raw_path:
+                return False
+            target = Path(raw_path).resolve()
+            if not any(target == root.resolve() or root.resolve() in target.parents for root in allowed_roots):
+                logger.warning("跳过项目目录外的物理路径: %s", target)
+                return False
+            if not target.exists():
+                return False
+            if target.is_dir():
+                if not recursive:
+                    return False
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            return True
+
+        removed_files = 0
+        for user_file in user_files:
+            try:
+                removed_files += int(remove_owned_path(user_file.local_path))
+            except Exception as e:
+                result["errors"].append(f"删除上传文件失败: {e}")
+        result["deleted"]["physical_files"] = removed_files
+
+        if binding and binding.mount_dir:
+            try:
+                result["deleted"]["mount_dirs"] = int(remove_owned_path(binding.mount_dir, recursive=True))
+            except Exception as e:
+                result["deleted"]["mount_dirs"] = 0
+                result["errors"].append(f"删除沙箱挂载目录失败: {e}")
         
         # 1. 删除会话（SessionMessage 会通过 CASCADE 自动删除）
         try:
@@ -109,12 +167,27 @@ class SessionCleanupService:
             # 删除任务流
             if task_id:
                 task_stream_key = f"task_stream:{task_id}"
-                deleted = await redis.delete(task_stream_key)
+                deleted = await redis.delete(task_stream_key, f"task_owner:{task_id}")
                 result["deleted"]["task_streams"] = deleted
                 logger.info(f"  删除任务流: {task_stream_key}")
             else:
                 result["deleted"]["task_streams"] = 0
-            
+
+            # Completed tasks no longer have a session_task pointer. Resolve
+            # them through ownership records before deleting session keys.
+            async for owner_key in redis.scan_iter("task_owner:*"):
+                try:
+                    owner = json.loads(await redis.get(owner_key) or "{}")
+                    if owner.get("session_id") != session_id:
+                        continue
+                    owned_task_id = owner_key.split(":", 1)[1]
+                    result["deleted"]["task_streams"] += await redis.delete(
+                        owner_key,
+                        f"task_stream:{owned_task_id}",
+                    )
+                except (json.JSONDecodeError, IndexError, TypeError):
+                    logger.warning("Skipping invalid task ownership record: %s", owner_key)
+
             # 删除其他会话相关键
             redis_keys = [
                 f"session_task:{session_id}",
@@ -156,7 +229,7 @@ class SessionCleanupService:
     async def close(self):
         """关闭连接"""
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
             self._redis = None
 
 
