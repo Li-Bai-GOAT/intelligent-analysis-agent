@@ -29,6 +29,13 @@ from datetime import datetime
 router = APIRouter(prefix="/files", tags=["文件管理"])
 
 
+def _is_within_workspace(target_path: str, mount_dir: str) -> bool:
+    try:
+        return os.path.commonpath([target_path, mount_dir]) == mount_dir
+    except ValueError:
+        return False
+
+
 @router.post("/upload", response_model=List[FileUploadResponse], summary="上传文件")
 async def upload_files(
     files: List[UploadFile] = File(...),
@@ -243,7 +250,7 @@ async def list_sandbox_workspace(
     # 安全检查：防止路径遍历
     target_path = os.path.realpath(target_path)
     mount_dir_real = os.path.realpath(mount_dir)
-    if not target_path.startswith(mount_dir_real):
+    if not _is_within_workspace(target_path, mount_dir_real):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效路径")
     
     if not os.path.exists(target_path):
@@ -287,7 +294,7 @@ async def download_sandbox_file(
     # 安全检查：防止路径遍历
     target_path = os.path.realpath(target_path)
     mount_dir_real = os.path.realpath(mount_dir)
-    if not target_path.startswith(mount_dir_real):
+    if not _is_within_workspace(target_path, mount_dir_real):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效路径")
     
     if not os.path.exists(target_path) or not os.path.isfile(target_path):
@@ -336,7 +343,7 @@ async def get_sandbox_file_content(
     target_path = os.path.realpath(target_path)
     mount_dir_real = os.path.realpath(mount_dir)
     
-    if not target_path.startswith(mount_dir_real):
+    if not _is_within_workspace(target_path, mount_dir_real):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效路径")
     
     if not os.path.exists(target_path) or not os.path.isfile(target_path):
@@ -395,11 +402,14 @@ async def get_sandbox_file_content(
 async def get_sandbox_file_raw(
     session_id: str,
     path: str = Query(..., description="文件相对路径"),
+    user: User = Depends(get_current_user),
 ):
-    """获取沙箱文件原始内容（用于图片/HTML预览，无需认证，session_id本身作为访问控制）"""
+    """获取沙箱文件原始内容（用于图片/HTML预览）。"""
     binding = await SandboxBindingRepository.get_by_session(session_id)
     if not binding:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到沙箱绑定")
+    if binding.user_id != str(user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问")
     
     mount_dir = binding.mount_dir
     if not mount_dir:
@@ -409,7 +419,7 @@ async def get_sandbox_file_raw(
     target_path = os.path.realpath(target_path)
     mount_dir_real = os.path.realpath(mount_dir)
     
-    if not target_path.startswith(mount_dir_real):
+    if not _is_within_workspace(target_path, mount_dir_real):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效路径")
     
     if not os.path.exists(target_path) or not os.path.isfile(target_path):
@@ -496,7 +506,7 @@ async def save_sandbox_file_content(
     mount_dir_real = os.path.realpath(mount_dir)
     
     # 安全检查：防止路径遍历
-    if not target_path.startswith(mount_dir_real):
+    if not _is_within_workspace(target_path, mount_dir_real):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效路径")
     
     if not os.path.exists(target_path) or not os.path.isfile(target_path):

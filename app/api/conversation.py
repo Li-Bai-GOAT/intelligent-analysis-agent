@@ -7,7 +7,7 @@
 
 import json
 import re
-from typing import Optional, List
+from typing import Literal, Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str  # 必填，需先调用 POST /sessions 创建会话
     file_ids: Optional[List[str]] = None  # 携带的文件 ID 列表
+    execution_mode: Literal["auto", "kuncode"] = "auto"
 
 
 class CreateSessionResponse(BaseModel):
@@ -99,6 +100,7 @@ async def chat(
                 session_id=data.session_id,
                 message=data.message,
                 file_ids=data.file_ids,
+                execution_mode=data.execution_mode,
             ):
                 if await request.is_disconnected():
                     break
@@ -145,6 +147,7 @@ async def submit_async_task(
         "session_id": data.session_id,
         "message": data.message,
         "file_ids": data.file_ids or [],
+        "execution_mode": data.execution_mode,
     }
 
     # Store task ownership before scheduling so only the authenticated session

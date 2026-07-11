@@ -3,7 +3,7 @@
 用户认证服务
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -34,7 +34,7 @@ class AuthService:
         payload = {
             "sub": str(user_id),
             "username": username,
-            "exp": datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS),
+            "exp": datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRE_HOURS),
         }
         return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
     

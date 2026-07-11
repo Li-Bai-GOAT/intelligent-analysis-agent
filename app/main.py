@@ -14,6 +14,7 @@ os.environ.setdefault("RUNTIME_SANDBOX_TIMEOUT", "7200")
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 from pathlib import Path
@@ -33,7 +34,7 @@ from app.config import settings
 from app.database import init_db, close_db
 from app.api import api_router
 from app.services.agent_service import AgentService
-from app.services.milvus_bootstrap import ensure_milvus_schema
+from app.services.milvus_bootstrap import check_milvus_connection, ensure_milvus_schema
 
 
 @asynccontextmanager
@@ -78,6 +79,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def attach_request_id(request, call_next):
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
     
     # 注册 API 路由
     app.include_router(api_router)
@@ -126,18 +135,23 @@ def create_app() -> FastAPI:
         except Exception:
             dependencies["sandbox"] = "unavailable"
 
-        try:
-            endpoint = settings.MILVUS_URI.replace("http://", "").replace("https://", "")
-            host, port_text = endpoint.rsplit(":", 1)
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, int(port_text)),
-                timeout=3.0,
-            )
-            writer.close()
-            await writer.wait_closed()
-            dependencies["milvus"] = "ok"
-        except Exception:
-            dependencies["milvus"] = "degraded"
+        dependencies["milvus"] = (
+            "ok" if await asyncio.to_thread(check_milvus_connection) else "degraded"
+        )
+
+        if settings.EMBEDDING_ENABLED:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    response = await client.get(
+                        f"{settings.EMBEDDING_BASE_URL.rstrip('/')}/models",
+                        headers={"Authorization": f"Bearer {settings.EMBEDDING_API_KEY}"},
+                    )
+                    response.raise_for_status()
+                dependencies["embedding"] = "ok"
+            except Exception:
+                dependencies["embedding"] = "degraded"
+        else:
+            dependencies["embedding"] = "disabled"
 
         required = ("postgres", "redis", "sandbox")
         is_ready = all(dependencies[name] == "ok" for name in required)

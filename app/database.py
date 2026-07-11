@@ -3,9 +3,14 @@
 数据库连接管理 (Tortoise ORM)
 """
 
+import asyncio
+
 from tortoise import Tortoise
 
 from app.config import settings
+
+_init_lock = asyncio.Lock()
+_initialized = False
 
 TORTOISE_ORM = {
     "connections": {
@@ -37,27 +42,21 @@ TORTOISE_ORM = {
 
 
 async def init_db():
-    """初始化数据库连接 - 安全处理已有连接"""
-    import gc
-
-    # 强制清理所有现有的数据库连接
-    try:
-        from tortoise import connections
-        # 直接清空连接字典，避免调用 close_all 导致的事件循环问题
-        if hasattr(connections, '_connections'):
-            connections._connections = {}
-        if hasattr(connections, '_inited'):
-            connections._inited = False
-    except Exception:
-        pass
-
-    # 强制垃圾回收
-    gc.collect()
-
-    await Tortoise.init(config=TORTOISE_ORM)
-    await Tortoise.generate_schemas(safe=True)
+    """Initialize the ORM once per process without touching Tortoise internals."""
+    global _initialized
+    if _initialized:
+        return
+    async with _init_lock:
+        if _initialized:
+            return
+        await Tortoise.init(config=TORTOISE_ORM)
+        if settings.DB_AUTO_CREATE_SCHEMA:
+            await Tortoise.generate_schemas(safe=True)
+        _initialized = True
 
 
 async def close_db():
     """关闭数据库连接"""
+    global _initialized
     await Tortoise.close_connections()
+    _initialized = False

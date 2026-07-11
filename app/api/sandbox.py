@@ -12,7 +12,7 @@ from typing import Optional
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import get_admin_user
 from app.models import User, SandboxAgent, SandboxSkill, SandboxSkillPermission, SandboxMcp
@@ -67,8 +67,7 @@ class AgentResponse(BaseModel):
     created_at: str
     updated_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SkillPermissionUpdate(BaseModel):
@@ -84,7 +83,7 @@ class SkillResponse(BaseModel):
     enabled: bool
     created_at: str
     updated_at: str
-    agent_permissions: list = []
+    agent_permissions: list = Field(default_factory=list)
 
 
 def parse_skill_md(content: str) -> dict:
@@ -137,8 +136,7 @@ class McpResponse(BaseModel):
     created_at: str
     updated_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ==================== Agent APIs ====================

@@ -94,11 +94,6 @@ def filter_model_tokens(text: str) -> str:
     return text
 
 
-def _should_direct_run_kuncode(message: str) -> bool:
-    normalized = (message or "").lower()
-    return "run_kuncode" in normalized or "kuncode" in normalized
-
-
 def _extract_tool_response_text(response: Any) -> str:
     content = getattr(response, "content", response)
     if isinstance(content, list):
@@ -625,7 +620,7 @@ class AgentService:
         if self.cleanup_service:
             await self.cleanup_service.stop()
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
         
         self._started = False
         print("[AgentService] 服务已停止")
@@ -1078,6 +1073,7 @@ class AgentService:
         session_id: Optional[str],
         message: str,
         file_ids: Optional[List[str]] = None,
+        execution_mode: str = "auto",
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         执行对话（流式输出）
@@ -1162,7 +1158,7 @@ class AgentService:
                 file_hint = self._build_file_hint(file_paths)
                 final_message = f"{message}\n\n{file_hint}"
 
-            if _should_direct_run_kuncode(message):
+            if execution_mode == "kuncode":
                 metadata = (
                     {"file_ids": file_ids, "file_paths": file_paths}
                     if file_ids
@@ -1648,7 +1644,7 @@ class AgentService:
                 await redis_client.expire(session_key, 3600)  # 续期1小时
                 await redis_client.expire(f"task_owner:{task_id}", 3600)
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
     
     async def read_task_stream(self, task_id: str, last_id: str = "0") -> AsyncGenerator[dict, None]:
         """读取任务流消息 - 创建独立的 Redis 连接避免跨进程连接问题"""
@@ -1679,7 +1675,7 @@ class AgentService:
                     yield {"type": "error", "content": str(e)}
                     return
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
     
     async def _connect_or_create_sandbox(self, session_id: str, user_id: str, file_ids: List[str] = None):
         """

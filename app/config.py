@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Any
 
 from pydantic import field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -43,6 +43,8 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT.strip().lower() in {"production", "prod"}:
             if self.JWT_SECRET == "change-this-in-production":
                 raise ValueError("JWT_SECRET must be configured outside development")
+            if self.DB_AUTO_CREATE_SCHEMA:
+                raise ValueError("DB_AUTO_CREATE_SCHEMA must be false in production; use Aerich migrations")
         return self
     
     # PostgreSQL
@@ -52,6 +54,7 @@ class Settings(BaseSettings):
     DB_USER: str = "postgres"
     DB_PASSWORD: str = ""
     DB_NAME: str = "rca_agent"
+    DB_AUTO_CREATE_SCHEMA: bool = True
     
     @property
     def DATABASE_URL(self) -> str:
@@ -131,10 +134,9 @@ class Settings(BaseSettings):
     EMBEDDING_BASE_URL: str = "http://localhost:9997/v1"
     EMBEDDING_MODEL: str = "Qwen3-Embedding-4B"
     EMBEDDING_API_KEY: str = "none"
+    EMBEDDING_ENABLED: bool = False
     
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 @lru_cache

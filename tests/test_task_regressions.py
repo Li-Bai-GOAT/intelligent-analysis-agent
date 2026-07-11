@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from app.api.conversation import _require_session_owner
+from app.api.conversation import ChatRequest, _require_session_owner
+from app.api.files import _is_within_workspace
 from app.repositories.session_repo import SessionRepository
 from app.services.agent_service import AgentService
 from app.tasks import _local_tasks, start_local_task
@@ -37,7 +38,7 @@ class FakeStreamRedis(FakeRedis):
         self.entries.append((key, fields, maxlen, approximate))
         return "1-0"
 
-    async def close(self):
+    async def aclose(self):
         return None
 
 
@@ -48,6 +49,21 @@ class FakeSandbox:
 
 
 class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execution_mode_is_explicit_and_defaults_to_auto(self):
+        request = ChatRequest(message="please explain kuncode", session_id="session-1")
+        self.assertEqual(request.execution_mode, "auto")
+
+        direct = ChatRequest(
+            message="run this task",
+            session_id="session-1",
+            execution_mode="kuncode",
+        )
+        self.assertEqual(direct.execution_mode, "kuncode")
+
+    async def test_workspace_path_check_rejects_prefix_collision(self):
+        self.assertTrue(_is_within_workspace(r"C:\data\workspace\report.txt", r"C:\data\workspace"))
+        self.assertFalse(_is_within_workspace(r"C:\data\workspace-secret\report.txt", r"C:\data\workspace"))
+
     async def test_local_task_uses_requested_task_id(self):
         completed = asyncio.Event()
 
