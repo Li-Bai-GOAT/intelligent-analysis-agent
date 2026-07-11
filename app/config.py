@@ -8,7 +8,7 @@
 from functools import lru_cache
 from typing import Any
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     APP_NAME: str = "RootCauseAnalysis"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8090
+    ENVIRONMENT: str = "development"
     DEBUG: bool = False
+    CORS_ORIGINS: str = "http://localhost:8090,http://127.0.0.1:8090,http://localhost:5173,http://127.0.0.1:5173"
 
     @field_validator("DEBUG", mode="before")
     @classmethod
@@ -31,6 +33,17 @@ class Settings(BaseSettings):
             if normalized in {"debug", "dev", "development"}:
                 return True
         return value
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        if self.ENVIRONMENT.strip().lower() in {"production", "prod"}:
+            if self.JWT_SECRET == "change-this-in-production":
+                raise ValueError("JWT_SECRET must be configured outside development")
+        return self
     
     # PostgreSQL
     DB_ENGINE: str = "postgres"
