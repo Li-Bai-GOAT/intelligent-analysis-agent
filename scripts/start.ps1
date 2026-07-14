@@ -12,6 +12,9 @@ $PidDirectory = Join-Path $ProjectRoot '.pids'
 $LogDirectory = Join-Path $ProjectRoot 'logs'
 $Python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
 $SandboxServer = Join-Path $ProjectRoot '.venv\Scripts\runtime-sandbox-server.exe'
+$OllamaRuntime = Join-Path (Split-Path -Parent $ProjectRoot) '.runtime\ollama'
+$Ollama = Join-Path $OllamaRuntime 'bin\ollama.exe'
+$OllamaModels = Join-Path $OllamaRuntime 'models'
 
 New-Item -ItemType Directory -Path $PidDirectory, $LogDirectory -Force | Out-Null
 
@@ -87,13 +90,50 @@ function Stop-ManagedService([string]$Name) {
 
     $pidValue = Get-Content $pidFile -Raw
     if ($pidValue -match '^\s*(\d+)\s*$') {
-        $process = Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue
+        $processId = [int]$Matches[1]
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
         if ($process) {
-            Stop-Process -Id $process.Id -Force
-            Write-Host "[stopped] $Name (PID $($process.Id))"
+            $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+            $commandLine = if ($processInfo) { [string]$processInfo.CommandLine } else { '' }
+            $isExpectedProcess = switch ($Name) {
+                'main' { $process.Name -match '^python' -and $commandLine -match 'app\.main:app' }
+                'sandbox' { $process.Name -eq 'runtime-sandbox-server' }
+                'embedding' { $process.Name -eq 'ollama' -and $commandLine -match '\bserve\b' }
+                default { $false }
+            }
+            if ($isExpectedProcess) {
+                Stop-Process -Id $process.Id -Force
+                Write-Host "[stopped] $Name (PID $($process.Id))"
+            } else {
+                Write-Warning "Ignoring stale PID file for $Name; PID $processId belongs to $($process.Name)."
+            }
         }
     }
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Start-EmbeddingService {
+    $existingPid = Get-ListenerPid 9997
+    if ($existingPid) {
+        Write-Host "[running] embedding is already listening on 9997 (PID $existingPid)"
+        return
+    }
+    if (-not (Test-Path $Ollama)) {
+        Write-Warning "Ollama executable was not found: $Ollama"
+        return
+    }
+
+    New-Item -ItemType Directory -Path $OllamaModels -Force | Out-Null
+    $env:OLLAMA_HOST = '127.0.0.1:9997'
+    $env:OLLAMA_MODELS = $OllamaModels
+    $stdout = Join-Path $LogDirectory 'embedding.out.log'
+    $stderr = Join-Path $LogDirectory 'embedding.err.log'
+    $process = Start-Process -FilePath $Ollama -ArgumentList @('serve') -WorkingDirectory $ProjectRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+    Set-Content -Path (Join-Path $PidDirectory 'embedding.pid') -Value $process.Id -Encoding ascii
+    if (-not (Wait-Http 'http://127.0.0.1:9997/v1/models' 60)) {
+        throw "Embedding service did not become healthy. Check $stderr"
+    }
+    Write-Host '[started] embedding is ready on 9997'
 }
 
 function Show-Status {
@@ -101,6 +141,7 @@ function Show-Status {
         @{ Name = 'postgres'; Port = 5488; Url = $null },
         @{ Name = 'redis'; Port = 6380; Url = $null },
         @{ Name = 'milvus'; Port = 19530; Url = $null },
+        @{ Name = 'embedding'; Port = 9997; Url = 'http://127.0.0.1:9997/v1/models' },
         @{ Name = 'sandbox'; Port = 10001; Url = 'http://127.0.0.1:10001/docs' },
         @{ Name = 'main'; Port = 8090; Url = 'http://127.0.0.1:8090/ready' }
     )) {
@@ -119,12 +160,18 @@ function Assert-Dependencies {
     }
     if (-not (Test-TcpPort 19530)) {
         Write-Warning 'Milvus is unavailable on port 19530. Knowledge-base features will be degraded.'
+    } elseif (-not (Wait-Http 'http://127.0.0.1:9091/healthz' 60)) {
+        Write-Warning 'Milvus port is open but the service did not become healthy. Knowledge-base features will be degraded.'
+    }
+    if (-not (Test-TcpPort 9997) -and -not (Test-Path $Ollama)) {
+        Write-Warning 'Embedding service is unavailable on port 9997. Vector indexing will be disabled.'
     }
 }
 
 switch ($Action) {
     'up' {
         Assert-Dependencies
+        Start-EmbeddingService
         Start-ManagedService 'sandbox' 10001 'http://127.0.0.1:10001/docs' $SandboxServer @(
             '--config', (Join-Path $ProjectRoot 'sandbox.env'),
             '--extension', (Join-Path $ProjectRoot 'data_analysis_sandbox.py'),
@@ -138,10 +185,12 @@ switch ($Action) {
     'down' {
         Stop-ManagedService 'main'
         Stop-ManagedService 'sandbox'
+        Stop-ManagedService 'embedding'
     }
     'restart' {
         Stop-ManagedService 'main'
         Stop-ManagedService 'sandbox'
+        Stop-ManagedService 'embedding'
         & $PSCommandPath -Action up
     }
     'status' { Show-Status }

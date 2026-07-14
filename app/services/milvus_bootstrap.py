@@ -41,7 +41,30 @@ def ensure_milvus_schema() -> bool:
             logger.info("Created Milvus database: %s", settings.MILVUS_DATABASE)
         db.using_database(settings.MILVUS_DATABASE, using=_ALIAS)
 
-        if not utility.has_collection(settings.MILVUS_COLLECTION, using=_ALIAS):
+        collection_exists = utility.has_collection(settings.MILVUS_COLLECTION, using=_ALIAS)
+        if collection_exists:
+            existing = Collection(settings.MILVUS_COLLECTION, using=_ALIAS)
+            embedding_field = next((field for field in existing.schema.fields if field.name == "embedding"), None)
+            actual_dim = embedding_field.params.get("dim") if embedding_field else None
+            if actual_dim != settings.MILVUS_DIM:
+                if existing.num_entities:
+                    logger.error(
+                        "Milvus collection dimension mismatch: configured=%s actual=%s entities=%s. "
+                        "Run the rebuild script before changing embedding models.",
+                        settings.MILVUS_DIM,
+                        actual_dim,
+                        existing.num_entities,
+                    )
+                    return False
+                utility.drop_collection(settings.MILVUS_COLLECTION, using=_ALIAS)
+                collection_exists = False
+                logger.warning(
+                    "Recreating empty Milvus collection after dimension change: %s -> %s",
+                    actual_dim,
+                    settings.MILVUS_DIM,
+                )
+
+        if not collection_exists:
             schema = CollectionSchema(
                 fields=[
                     FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=64, is_primary=True),

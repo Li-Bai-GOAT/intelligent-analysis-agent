@@ -141,12 +141,21 @@ def create_app() -> FastAPI:
 
         if settings.EMBEDDING_ENABLED:
             try:
-                async with httpx.AsyncClient(timeout=3.0) as client:
+                async with httpx.AsyncClient(timeout=5.0) as client:
                     response = await client.get(
                         f"{settings.EMBEDDING_BASE_URL.rstrip('/')}/models",
                         headers={"Authorization": f"Bearer {settings.EMBEDDING_API_KEY}"},
                     )
                     response.raise_for_status()
+                    model_ids = {
+                        item.get("id")
+                        for item in response.json().get("data", [])
+                        if isinstance(item, dict)
+                    }
+                    if settings.EMBEDDING_MODEL not in model_ids:
+                        raise RuntimeError(
+                            f"Embedding model is not installed: {settings.EMBEDDING_MODEL}"
+                        )
                 dependencies["embedding"] = "ok"
             except Exception:
                 dependencies["embedding"] = "degraded"

@@ -127,14 +127,15 @@ class Settings(BaseSettings):
     MILVUS_URI: str = "http://localhost:19530"
     MILVUS_TOKEN: str = "root:Milvus"
     MILVUS_DATABASE: str = "rca_agent"
-    MILVUS_DIM: int = 768
+    MILVUS_DIM: int = 1024
     MILVUS_COLLECTION: str = "rca_knowledge_base"
     
     # Embedding 服务
     EMBEDDING_BASE_URL: str = "http://localhost:9997/v1"
-    EMBEDDING_MODEL: str = "Qwen3-Embedding-4B"
+    EMBEDDING_MODEL: str = "qwen3-embedding:0.6b"
     EMBEDDING_API_KEY: str = "none"
-    EMBEDDING_ENABLED: bool = False
+    EMBEDDING_ENABLED: bool = True
+    EMBEDDING_TIMEOUT_SECONDS: float = 120.0
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

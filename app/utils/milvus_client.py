@@ -80,7 +80,7 @@ class MilvusClient:
                 f"{settings.EMBEDDING_BASE_URL}/embeddings",
                 headers={"Authorization": f"Bearer {settings.EMBEDDING_API_KEY}"},
                 json={"model": settings.EMBEDDING_MODEL, "input": text, "dimensions": settings.MILVUS_DIM},
-                timeout=30.0
+                timeout=settings.EMBEDDING_TIMEOUT_SECONDS
             )
             response.raise_for_status()
             return response.json()["data"][0]["embedding"]

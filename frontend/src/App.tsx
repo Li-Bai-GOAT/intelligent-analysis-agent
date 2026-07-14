@@ -7,6 +7,7 @@ import { Header } from './components/layout/Header'
 import { Sidebar } from './components/layout/Sidebar'
 import { ChatArea } from './components/chat/ChatArea'
 import { RightPanel } from './components/layout/RightPanel'
+import { AdminApp } from './admin/AdminApp'
 
 export default function App() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
@@ -24,17 +25,7 @@ export default function App() {
   }
 
   if (page === 'admin') {
-    return (
-      <div className="h-screen flex flex-col bg-bg-base">
-        <Header />
-        <div className="flex-1 flex items-center justify-center text-text-muted">
-          <div className="text-center">
-            <p className="text-sm mb-2">管理后台</p>
-            <p className="text-xs">开发中...</p>
-          </div>
-        </div>
-      </div>
-    )
+    return <AdminApp />
   }
 
   return (
