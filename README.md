@@ -262,6 +262,9 @@ python scripts/rebuild_milvus_from_postgres.py
 先启动 PostgreSQL、Redis 和 Milvus 的 Docker 容器，然后使用原生 PowerShell 脚本管理 Sandbox 与主服务：
 
 ```powershell
+docker compose -f .\milvus\docker-compose.yml up -d
+docker compose -f .\embedding\docker-compose.yml up -d
+docker exec dataagent-ollama ollama pull qwen3-embedding:0.6b
 .\scripts\start.ps1 -Action up
 .\scripts\start.ps1 -Action status
 .\scripts\start.ps1 -Action logs -Service main
@@ -269,6 +272,10 @@ python scripts/rebuild_milvus_from_postgres.py
 ```
 
 `up` 会等待 `10001` Sandbox 和 `8090/ready` 通过，而不是仅依赖固定延时或进程 PID。
+
+Embedding 默认使用 `qwen3-embedding:0.6b` 和 1024 维向量。除 Docker 方式外，启动脚本也会自动识别
+`..\.runtime\ollama\bin\ollama.exe`，在 `9997` 端口启动本地 Ollama，并将模型保存到
+`..\.runtime\ollama\models`。
 
 ---
 

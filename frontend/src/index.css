@@ -65,6 +65,10 @@ code, pre, .font-mono {
   font-family: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
 }
 
+details[open] > summary .details-chevron {
+  transform: rotate(90deg);
+}
+
 /* Markdown content styles */
 .markdown-body p { margin: 0 0 0.5em 0; }
 .markdown-body p:last-child { margin-bottom: 0; }

@@ -32,7 +32,7 @@ export function Modal({ open, onClose, title, children, footer, size = 'md' }: M
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className={`bg-bg-surface border border-border rounded-xl shadow-2xl w-full ${sizeClasses[size]} max-h-[85vh] flex flex-col`}>
+      <div className={`bg-bg-surface border border-border rounded-lg shadow-2xl w-[calc(100%_-_2rem)] ${sizeClasses[size]} max-h-[85vh] flex flex-col`}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 className="text-base font-semibold text-text-primary">{title}</h2>
           <button

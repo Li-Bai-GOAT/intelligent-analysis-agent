@@ -1,24 +1,24 @@
 import { create } from 'zustand'
+import type { AdminSection } from '../admin/types'
 
 type Page = 'auth' | 'app' | 'admin'
 type RightTab = 'plan' | 'files' | 'terminal'
-type AdminTab = 'knowledge' | 'prompt' | 'sandbox'
 
 interface UiState {
   page: Page
   rightTab: RightTab
-  adminTab: AdminTab
+  adminTab: AdminSection
   sidebarCollapsed: boolean
   setPage: (page: Page) => void
   setRightTab: (tab: RightTab) => void
-  setAdminTab: (tab: AdminTab) => void
+  setAdminTab: (tab: AdminSection) => void
   toggleSidebar: () => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
   page: 'auth',
   rightTab: 'files',
-  adminTab: 'knowledge',
+  adminTab: 'overview',
   sidebarCollapsed: false,
   setPage: (page) => set({ page }),
   setRightTab: (tab) => set({ rightTab: tab }),
