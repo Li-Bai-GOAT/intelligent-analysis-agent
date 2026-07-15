@@ -1,4 +1,4 @@
-import { Bot, BrainCircuit, Boxes, Database, Gauge, PlugZap } from 'lucide-react'
+import { BrainCircuit, Boxes, Database, Gauge, PlugZap } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { useAuthStore } from '../stores/auth'
 import { useUiStore } from '../stores/ui'
@@ -6,7 +6,6 @@ import type { AdminSection } from './types'
 import { OverviewPage } from './pages/OverviewPage'
 import { KnowledgePage } from './pages/KnowledgePage'
 import { PromptPage } from './pages/PromptPage'
-import { AgentsPage } from './pages/AgentsPage'
 import { SkillsPage } from './pages/SkillsPage'
 import { McpsPage } from './pages/McpsPage'
 
@@ -14,15 +13,13 @@ const navigation: Array<{ key: AdminSection; label: string; description: string;
   { key: 'overview', label: '运行总览', description: '依赖与配置状态', icon: Gauge },
   { key: 'knowledge', label: '知识库', description: '维护 Agent 知识', icon: Database },
   { key: 'prompt', label: '系统提示词', description: '管理产品经理规则', icon: BrainCircuit },
-  { key: 'agents', label: 'Agent', description: '模型与工具配置', icon: Bot },
-  { key: 'skills', label: 'Skills', description: '能力包与权限', icon: Boxes },
+  { key: 'skills', label: 'Skills', description: 'KunCode 能力包', icon: Boxes },
   { key: 'mcps', label: 'MCP', description: '外部工具服务', icon: PlugZap },
 ]
 
 function CurrentPage({ section }: { section: AdminSection }) {
   if (section === 'knowledge') return <KnowledgePage />
   if (section === 'prompt') return <PromptPage />
-  if (section === 'agents') return <AgentsPage />
   if (section === 'skills') return <SkillsPage />
   if (section === 'mcps') return <McpsPage />
   return <OverviewPage />
@@ -92,4 +89,3 @@ export function AdminApp() {
     </div>
   )
 }
-

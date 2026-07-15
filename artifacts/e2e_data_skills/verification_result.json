@@ -1,0 +1,28 @@
+{
+  "status": "ok",
+  "checks": {
+    "has_end": true,
+    "tool_ids_match": true,
+    "no_error_events": true,
+    "generated_file_count": true,
+    "normal_injected_paths": true,
+    "cleaned_rows": true,
+    "duplicates": true,
+    "gross_profit": true,
+    "gross_margin": true,
+    "conversion_rate": true,
+    "weighted_average": true,
+    "session_history_persisted": true,
+    "task_not_running": true,
+    "binding_active": true
+  },
+  "sandbox_id": "data-sandbox-19r7r7e8omgskpnvgi28g7kcl",
+  "session_id": "session_c861a19c1b96",
+  "generated_files": [
+    "e2e_results/cleaning/cleaned_data.csv",
+    "e2e_results/cleaning/data_quality_report.md",
+    "e2e_results/cleaning/data_quality_summary.json",
+    "e2e_results/metrics/metric_report.md",
+    "e2e_results/metrics/metric_results.json"
+  ]
+}

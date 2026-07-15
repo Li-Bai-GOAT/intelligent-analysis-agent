@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tabular Data Cleaning"
+  short_description: "Audit and clean CSV or Excel data safely"
+  default_prompt: "Use $tabular-data-cleaning to audit and clean this table without overwriting the source."

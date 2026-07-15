@@ -1,0 +1,58 @@
+{
+  "source": "e2e_dirty_sales.csv",
+  "original_rows": 10,
+  "cleaned_rows": 9,
+  "removed_exact_duplicates": 1,
+  "exact_duplicate_rows_found": 1,
+  "business_duplicate_rows_found": 2,
+  "invalid_dates": {
+    "order_date": 1
+  },
+  "invalid_numeric": {
+    "revenue": 0,
+    "cost": 0,
+    "visits": 0,
+    "orders": 0,
+    "score": 0,
+    "weight": 0
+  },
+  "missing_values_after_cleaning": {
+    "order_date": 1,
+    "revenue": 1,
+    "cost": 1,
+    "score": 1
+  },
+  "outlier_candidates": {
+    "revenue": {
+      "count": 1,
+      "lower": -700.0,
+      "upper": 1700.0
+    },
+    "cost": {
+      "count": 1,
+      "lower": -225.0,
+      "upper": 775.0
+    },
+    "visits": {
+      "count": 1,
+      "lower": -40.0,
+      "upper": 100.0
+    },
+    "orders": {
+      "count": 1,
+      "lower": -4.0,
+      "upper": 10.0
+    },
+    "score": {
+      "count": 0,
+      "lower": -1.0,
+      "upper": 7.0
+    },
+    "weight": {
+      "count": 1,
+      "lower": -0.5,
+      "upper": 3.5
+    }
+  },
+  "source_overwritten": false
+}

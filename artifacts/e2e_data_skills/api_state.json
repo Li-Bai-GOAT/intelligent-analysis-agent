@@ -1,0 +1,27 @@
+{
+  "knowledge_ids": [
+    "caad4b51-90dd-484b-b528-b300d0b23d8e",
+    "2cd7e75f-8a79-4f0a-b0b3-3dfc9b63b716",
+    "f6948961-98cc-4cd9-95b5-9a703423b695",
+    "9a549b65-1881-4adc-927d-5f254234aa11",
+    "1c538f27-d6ec-44e7-9c18-e1007679bcc7",
+    "2de97e35-6897-436d-b9ea-c6c4ebf411a9",
+    "02053501-f574-43ab-a4c5-3654ba628276",
+    "bd0673f9-aa72-46a5-ac2c-adfa3d8ef8b8"
+  ],
+  "skill_ids": {
+    "tabular-data-cleaning": 2,
+    "business-metric-formulas": 3
+  },
+  "agent": {
+    "id": 2,
+    "name": "e2e-data-analyst",
+    "mode": "primary"
+  },
+  "ui_verified": false,
+  "counts": {
+    "knowledge": 8,
+    "skills": 2,
+    "agents": 1
+  }
+}

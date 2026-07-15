@@ -1,0 +1,4 @@
+interface:
+  display_name: "Business Metric Formulas"
+  short_description: "Calculate business ratios with auditable formulas"
+  default_prompt: "Use $business-metric-formulas to calculate and reconcile the requested business metrics."

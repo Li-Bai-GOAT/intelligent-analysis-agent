@@ -1,0 +1,13 @@
+{
+  "original_rows": 10,
+  "cleaned_rows": 9,
+  "exact_duplicate_rows_found": 1,
+  "business_duplicate_rows_found": 2,
+  "invalid_date_rows": 1,
+  "revenue_sum": 12800.0,
+  "cost_sum": 4720.0,
+  "gross_profit": 8080.0,
+  "gross_margin": 0.63125,
+  "conversion_rate": 0.09777777777777778,
+  "weighted_average": 4.230769230769231
+}

@@ -13,7 +13,6 @@ import type {
   SkillConfig,
   SkillFileContent,
   SkillFileTree,
-  SkillPermissionValue,
   SystemPrompt,
 } from '../admin/types'
 
@@ -102,13 +101,6 @@ export class AdminApi {
     return Api.request<SkillFileContent>('GET', `/sandbox/skills/${id}/files/${encodeURIComponent(path)}`)
   }
 
-  static updateSkillPermissions(
-    id: number,
-    permissions: Array<{ agent_id: number; permission: SkillPermissionValue }>,
-  ) {
-    return Api.request<{ success: boolean; message: string }>('PUT', `/sandbox/skills/${id}/permissions`, permissions)
-  }
-
   static getMcps() {
     return Api.request<McpConfig[]>('GET', '/sandbox/mcps')
   }
@@ -125,4 +117,3 @@ export class AdminApi {
     return Api.request<{ success: boolean; message: string }>('DELETE', `/sandbox/mcps/${id}`)
   }
 }
-
