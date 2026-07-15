@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Bot, Boxes, Database, PlugZap, RefreshCw, Server } from 'lucide-react'
+import { Boxes, Database, PlugZap, RefreshCw, Server } from 'lucide-react'
 import { AdminApi } from '../../api/admin'
 import { Button } from '../../components/ui/Button'
 import type { ReadyStatus } from '../types'
@@ -9,8 +9,6 @@ import { formatDate } from '../utils'
 interface OverviewData {
   ready: ReadyStatus
   knowledge: number
-  agents: number
-  enabledAgents: number
   skills: number
   enabledSkills: number
   mcps: number
@@ -36,7 +34,6 @@ export function OverviewPage() {
     const results = await Promise.allSettled([
       AdminApi.getReadyStatus(),
       AdminApi.listKnowledge(undefined, 1, 0),
-      AdminApi.getAgents(),
       AdminApi.getSkills(),
       AdminApi.getMcps(),
       AdminApi.getSystemPrompt(),
@@ -46,17 +43,14 @@ export function OverviewPage() {
       ? results[0].value
       : { status: 'unavailable' as const, dependencies: {} }
     const knowledge = results[1].status === 'fulfilled' ? results[1].value.total : 0
-    const agents = results[2].status === 'fulfilled' ? results[2].value : []
-    const skills = results[3].status === 'fulfilled' ? results[3].value : []
-    const mcps = results[4].status === 'fulfilled' ? results[4].value : []
-    const prompt = results[5].status === 'fulfilled' ? results[5].value : null
+    const skills = results[2].status === 'fulfilled' ? results[2].value : []
+    const mcps = results[3].status === 'fulfilled' ? results[3].value : []
+    const prompt = results[4].status === 'fulfilled' ? results[4].value : null
     const failed = results.filter((result) => result.status === 'rejected').length
 
     setData({
       ready,
       knowledge,
-      agents: agents.length,
-      enabledAgents: agents.filter((item) => item.enabled).length,
       skills: skills.length,
       enabledSkills: skills.filter((item) => item.enabled).length,
       mcps: mcps.length,
@@ -74,7 +68,6 @@ export function OverviewPage() {
 
   const metrics = data ? [
     { label: '知识条目', value: String(data.knowledge), detail: '当前总量', icon: Database },
-    { label: 'Agents', value: String(data.agents), detail: `${data.enabledAgents} 个启用`, icon: Bot },
     { label: 'Skills', value: String(data.skills), detail: `${data.enabledSkills} 个启用`, icon: Boxes },
     { label: 'MCP 服务', value: String(data.mcps), detail: `${data.enabledMcps} 个启用`, icon: PlugZap },
   ] : []

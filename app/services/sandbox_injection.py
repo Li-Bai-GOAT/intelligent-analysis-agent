@@ -15,7 +15,7 @@ from typing import Optional
 import docker
 from docker.errors import NotFound, APIError
 
-from app.models import SandboxAgent, SandboxSkill, SandboxSkillPermission, SandboxMcp
+from app.models import SandboxAgent, SandboxSkill, SandboxMcp
 
 # Skill 本地存储目录
 SKILL_STORAGE_DIR = Path("sandbox_skills")
@@ -270,7 +270,10 @@ class SandboxInjectionService:
             for file_path in local_skill_dir.rglob("*"):
                 if file_path.is_file():
                     rel_path = file_path.relative_to(local_skill_dir)
-                    files[str(rel_path)] = file_path.read_bytes()
+                    # Docker containers use POSIX paths even when the host is Windows.
+                    # Path.__str__ would otherwise create archive members such as
+                    # ``scripts\\tool.py`` which are single filenames on Linux.
+                    files[rel_path.as_posix()] = file_path.read_bytes()
             
             if not files:
                 result["errors"].append(f"Skill '{skill.name}' 目录为空")
@@ -352,57 +355,6 @@ class SandboxInjectionService:
         
         return result
     
-    async def inject_skill_permissions(self, container_id: str) -> dict:
-        """
-        注入 Skill 权限配置到各 Agent
-        
-        Skill 权限通过 Agent 的 permission.skill 字段配置
-        
-        Args:
-            container_id: 容器 ID
-        
-        Returns:
-            注入结果
-        """
-        result = {"success": True, "updated_agents": [], "errors": []}
-        
-        # 获取所有有权限配置的 Agent
-        agents = await SandboxAgent.filter(enabled=True).all()
-        
-        for agent in agents:
-            # 获取该 Agent 的所有 Skill 权限配置
-            perms = await SandboxSkillPermission.filter(agent=agent).prefetch_related("skill")
-            
-            if not perms:
-                continue
-            
-            # 构建 skill 权限字典
-            skill_perms = {}
-            for perm in perms:
-                if perm.skill.enabled:
-                    skill_perms[perm.skill.name] = perm.permission
-            
-            if not skill_perms:
-                continue
-            
-            # 更新 Agent 的 permission.skill
-            if "skill" not in agent.permission:
-                agent.permission["skill"] = {}
-            agent.permission["skill"].update(skill_perms)
-            
-            # 重新生成并上传 Agent 文件
-            filename = f"{agent.name}.md"
-            content = agent.to_markdown().encode("utf-8")
-            if self._put_file_to_container(container_id, self.AGENT_DIR, filename, content):
-                result["updated_agents"].append(agent.name)
-            else:
-                result["errors"].append(f"Agent '{agent.name}' 权限更新失败")
-        
-        if result["errors"]:
-            result["success"] = False
-        
-        return result
-    
     async def inject_all(self, container_id: str) -> dict:
         """
         注入所有配置到容器
@@ -418,7 +370,6 @@ class SandboxInjectionService:
             "agents": None,
             "skills": None,
             "mcps": None,
-            "skill_permissions": None,
         }
         
         try:
@@ -435,11 +386,6 @@ class SandboxInjectionService:
             # 3. 注入 MCP
             result["mcps"] = await self.inject_mcps(container_id)
             if not result["mcps"]["success"]:
-                result["success"] = False
-            
-            # 4. 注入 Skill 权限（更新 Agent 文件）
-            result["skill_permissions"] = await self.inject_skill_permissions(container_id)
-            if not result["skill_permissions"]["success"]:
                 result["success"] = False
             
             logger.info(f"沙箱配置注入完成: {result}")

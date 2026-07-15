@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import get_admin_user
-from app.models import User, SandboxAgent, SandboxSkill, SandboxSkillPermission, SandboxMcp
+from app.models import User, SandboxAgent, SandboxSkill, SandboxMcp
 from app.services.sandbox_injection import get_injection_service
 
 # Skill 存储目录
@@ -70,11 +70,6 @@ class AgentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class SkillPermissionUpdate(BaseModel):
-    agent_id: int
-    permission: str = Field(..., pattern="^(allow|deny|ask)$")
-
-
 class SkillResponse(BaseModel):
     id: int
     name: str
@@ -83,7 +78,6 @@ class SkillResponse(BaseModel):
     enabled: bool
     created_at: str
     updated_at: str
-    agent_permissions: list = Field(default_factory=list)
 
 
 def parse_skill_md(content: str) -> dict:
@@ -277,7 +271,6 @@ async def delete_agent(agent_id: int, admin: User = Depends(get_admin_user)):
 
 async def _skill_to_response(skill: SandboxSkill) -> SkillResponse:
     """将 Skill 模型转换为响应对象"""
-    perms = await SandboxSkillPermission.filter(skill=skill).prefetch_related("agent")
     return SkillResponse(
         id=skill.id,
         name=skill.name,
@@ -286,10 +279,6 @@ async def _skill_to_response(skill: SandboxSkill) -> SkillResponse:
         enabled=skill.enabled,
         created_at=skill.created_at.isoformat(),
         updated_at=skill.updated_at.isoformat(),
-        agent_permissions=[
-            {"agent_id": p.agent_id, "agent_name": p.agent.name, "permission": p.permission}
-            for p in perms
-        ],
     )
 
 
@@ -505,34 +494,6 @@ async def get_skill_file_content(
     return {"path": file_path, "content": None, "type": "binary", "size": target_file.stat().st_size}
 
 
-@router.put("/skills/{skill_id}/permissions", summary="更新Skill权限")
-async def update_skill_permissions(
-    skill_id: int,
-    permissions: list[SkillPermissionUpdate],
-    admin: User = Depends(get_admin_user)
-):
-    """更新 Skill 对各 Agent 的权限配置"""
-    skill = await SandboxSkill.filter(id=skill_id).first()
-    if not skill:
-        raise HTTPException(status_code=404, detail="Skill 不存在")
-    
-    # 删除旧权限
-    await SandboxSkillPermission.filter(skill=skill).delete()
-    
-    # 创建新权限
-    for perm in permissions:
-        agent = await SandboxAgent.filter(id=perm.agent_id).first()
-        if not agent:
-            raise HTTPException(status_code=400, detail=f"Agent ID {perm.agent_id} 不存在")
-        await SandboxSkillPermission.create(
-            skill=skill,
-            agent=agent,
-            permission=perm.permission
-        )
-    
-    return {"success": True, "message": "权限已更新"}
-
-
 # ==================== MCP APIs ====================
 
 @router.get("/mcps", response_model=list[McpResponse], summary="获取MCP列表")
@@ -651,7 +612,6 @@ async def inject_to_sandbox(data: InjectRequest, admin: User = Depends(get_admin
     - Agent 配置（/root/.config/kuncode/agent/*.md）
     - Skill 配置（/root/.config/kuncode/skill/*/SKILL.md）
     - MCP 配置（更新 kuncode.json）
-    - Skill 权限配置（更新 Agent 的 permission.skill）
     """
     service = get_injection_service()
     result = await service.inject_all(data.container_id)

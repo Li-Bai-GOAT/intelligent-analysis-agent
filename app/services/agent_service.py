@@ -120,6 +120,8 @@ def _extract_workspace_files(output: str) -> list[str]:
         if not parts or any(part in {".", ".."} for part in parts):
             continue
         normalized = "/".join(parts)
+        if normalized.startswith("data/uploads/"):
+            continue
         if normalized not in files:
             files.append(normalized)
     return files
@@ -540,42 +542,8 @@ async def _load_system_prompt() -> str:
 
 
 async def _build_available_agents_prompt() -> str:
-    """
-    构建可用智能体列表提示词
-    
-    包含:
-    - KunCode 内置智能体: build, plan
-    - 数据库中已启用且 mode != subagent 的自定义智能体
-    """
-    from app.models import SandboxAgent
-    
-    lines = [
-        "",
-        "## 可用的 KunCode 智能体",
-        "",
-        "只有下表明确列出的名称才可以作为 `run_kuncode` 的 `agent` 参数。",
-        "如果下表没有任何可用名称，调用 `run_kuncode` 时必须省略 `agent` 参数，不要传 `None`、`default`、`data-analyst` 或自造名称。",
-        "",
-        "| 名称 | 描述 |",
-        "|------|------|",
-        # "| `build` | KunCode 内置构建智能体，用于代码生成和项目构建 |",
-        # "| `plan` | KunCode 内置规划智能体，用于任务分解和规划 |",
-    ]
-    
-    # 从数据库获取自定义智能体（排除 subagent）
-    has_agents = False
-    try:
-        agents = await SandboxAgent.filter(enabled=True).exclude(mode="subagent").all()
-        for agent in agents:
-            has_agents = True
-            lines.append(f"| `{agent.name}` | {agent.description} |")
-    except Exception:
-        pass  # 数据库未初始化时忽略
-    if not has_agents:
-        lines.append("| （无） | 当前没有可传入 `agent` 参数的 KunCode Agent |")
-    
-    lines.append("")
-    return "\n".join(lines)
+    """保留扩展点；默认执行模式不再从后台 Agent 配置中选择角色。"""
+    return ""
 
 
 class AgentService:

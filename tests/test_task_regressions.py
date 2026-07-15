@@ -1,4 +1,5 @@
 import asyncio
+import tarfile
 import json
 import unittest
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from app.services.agent_service import (
     _build_kuncode_completion_message,
     _extract_workspace_files,
 )
+from app.services.sandbox_injection import SandboxInjectionService
 from app.tasks import _local_tasks, start_local_task
 
 
@@ -52,15 +54,32 @@ class FakeSandbox:
         yield SimpleNamespace(content="final result")
 
 
+class FakeSandboxWithFiles:
+    async def run_kuncode(self, prompt):
+        yield SimpleNamespace(
+            content=(
+                "Created /workspace/reports/summary.html and "
+                "/workspace/data/uploads/source.csv"
+            )
+        )
+
+
 class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_kuncode_completion_reports_workspace_files(self):
         files = _extract_workspace_files(
-            "Created /workspace/reports/summary.html and workspace/data/result.csv."
+            "Created /workspace/reports/summary.html, workspace/data/result.csv, "
+            "and checked /workspace/data/uploads/source.csv."
         )
         self.assertEqual(files, ["reports/summary.html", "data/result.csv"])
         message = _build_kuncode_completion_message(files)
         self.assertIn("`reports/summary.html`", message)
         self.assertIn("data/result.csv", message)
+
+    async def test_skill_tar_uses_posix_member_paths(self):
+        service = SandboxInjectionService()
+        archive = service._create_tar_archive({"scripts/tool.py": b"print('ok')"})
+        with tarfile.open(fileobj=archive, mode="r") as tar:
+            self.assertEqual(tar.getnames(), ["scripts", "scripts/tool.py"])
 
     async def test_execution_mode_is_explicit_and_defaults_to_auto(self):
         request = ChatRequest(message="please explain kuncode", session_id="session-1")
@@ -175,3 +194,22 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         output_data = output_message["content"][0]["data"]
         self.assertEqual(output_data["call_id"], tool_id)
         self.assertEqual(json.loads(output_data["output"])[0]["text"], "final result")
+
+    async def test_direct_kuncode_emits_generated_files(self):
+        with (
+            patch.object(SessionRepository, "get", new=AsyncMock(return_value=None)),
+        ):
+            service = AgentService.__new__(AgentService)
+            events = [
+                event
+                async for event in service._direct_run_kuncode(
+                    FakeSandboxWithFiles(),
+                    "user-1",
+                    "session-1",
+                    "create report",
+                    "create report",
+                )
+            ]
+
+        self.assertEqual(events[-1]["generated_files"], ["reports/summary.html"])
+        self.assertIn("reports/summary.html", events[-1]["content"])

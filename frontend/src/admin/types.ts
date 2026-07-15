@@ -1,4 +1,4 @@
-export type AdminSection = 'overview' | 'knowledge' | 'prompt' | 'agents' | 'skills' | 'mcps'
+export type AdminSection = 'overview' | 'knowledge' | 'prompt' | 'skills' | 'mcps'
 
 export interface ReadyStatus {
   status: 'ok' | 'unavailable'
@@ -69,14 +69,6 @@ export interface AgentCreateInput {
 
 export type AgentUpdateInput = Omit<AgentCreateInput, 'name'>
 
-export type SkillPermissionValue = 'allow' | 'deny' | 'ask'
-
-export interface SkillAgentPermission {
-  agent_id: number
-  agent_name: string
-  permission: SkillPermissionValue
-}
-
 export interface SkillConfig {
   id: number
   name: string
@@ -85,7 +77,6 @@ export interface SkillConfig {
   enabled: boolean
   created_at: string
   updated_at: string
-  agent_permissions: SkillAgentPermission[]
 }
 
 export interface SkillFileNode {
@@ -134,4 +125,3 @@ export interface McpCreateInput {
 }
 
 export type McpUpdateInput = Omit<McpCreateInput, 'name'>
-

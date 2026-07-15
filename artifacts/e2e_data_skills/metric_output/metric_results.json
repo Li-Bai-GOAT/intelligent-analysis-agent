@@ -1,0 +1,280 @@
+{
+  "source": "cleaned_data.csv",
+  "overall": {
+    "rows": 9,
+    "inputs": {
+      "revenue": 12800.0,
+      "cost": 4720.0,
+      "visits": 450.0,
+      "orders": 44.0
+    },
+    "gross_profit": {
+      "formula": "sum(revenue) - sum(cost)",
+      "value": 8080.0,
+      "status": "ok"
+    },
+    "gross_margin": {
+      "formula": "gross_profit / sum(revenue)",
+      "value": 0.63125,
+      "status": "ok"
+    },
+    "conversion_rate": {
+      "formula": "sum(orders) / sum(visits)",
+      "value": 0.09777777777777778,
+      "status": "ok"
+    },
+    "weighted_average": {
+      "formula": "sum(value * weight) / sum(weight)",
+      "numerator": 55.0,
+      "denominator": 13.0,
+      "value": 4.230769230769231,
+      "status": "ok"
+    },
+    "invalid_numeric": {
+      "revenue": 0,
+      "cost": 0,
+      "visits": 0,
+      "orders": 0,
+      "score": 0,
+      "weight": 0
+    },
+    "missing_numeric": {
+      "revenue": 1,
+      "cost": 1,
+      "visits": 0,
+      "orders": 0,
+      "score": 1,
+      "weight": 0
+    },
+    "negative_value_rows": {
+      "revenue": 1,
+      "cost": 1,
+      "visits": 0,
+      "orders": 1,
+      "score": 0,
+      "weight": 0
+    }
+  },
+  "groups": {
+    "east": {
+      "rows": 3,
+      "inputs": {
+        "revenue": 1600.0,
+        "cost": 1030.0,
+        "visits": 150.0,
+        "orders": 17.0
+      },
+      "gross_profit": {
+        "formula": "sum(revenue) - sum(cost)",
+        "value": 570.0,
+        "status": "ok"
+      },
+      "gross_margin": {
+        "formula": "gross_profit / sum(revenue)",
+        "value": 0.35625,
+        "status": "ok"
+      },
+      "conversion_rate": {
+        "formula": "sum(orders) / sum(visits)",
+        "value": 0.11333333333333333,
+        "status": "ok"
+      },
+      "weighted_average": {
+        "formula": "sum(value * weight) / sum(weight)",
+        "numerator": 11.0,
+        "denominator": 3.0,
+        "value": 3.6666666666666665,
+        "status": "ok"
+      },
+      "invalid_numeric": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      },
+      "missing_numeric": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      },
+      "negative_value_rows": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      }
+    },
+    "north": {
+      "rows": 2,
+      "inputs": {
+        "revenue": 9900.0,
+        "cost": 2940.0,
+        "visits": 220.0,
+        "orders": 19.0
+      },
+      "gross_profit": {
+        "formula": "sum(revenue) - sum(cost)",
+        "value": 6960.0,
+        "status": "ok"
+      },
+      "gross_margin": {
+        "formula": "gross_profit / sum(revenue)",
+        "value": 0.703030303030303,
+        "status": "ok"
+      },
+      "conversion_rate": {
+        "formula": "sum(orders) / sum(visits)",
+        "value": 0.08636363636363636,
+        "status": "ok"
+      },
+      "weighted_average": {
+        "formula": "sum(value * weight) / sum(weight)",
+        "numerator": 21.0,
+        "denominator": 5.0,
+        "value": 4.2,
+        "status": "ok"
+      },
+      "invalid_numeric": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      },
+      "missing_numeric": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      },
+      "negative_value_rows": {
+        "revenue": 1,
+        "cost": 1,
+        "visits": 0,
+        "orders": 1,
+        "score": 0,
+        "weight": 0
+      }
+    },
+    "south": {
+      "rows": 2,
+      "inputs": {
+        "revenue": 500.0,
+        "cost": 150.0,
+        "visits": 40.0,
+        "orders": 4.0
+      },
+      "gross_profit": {
+        "formula": "sum(revenue) - sum(cost)",
+        "value": 350.0,
+        "status": "ok"
+      },
+      "gross_margin": {
+        "formula": "gross_profit / sum(revenue)",
+        "value": 0.7,
+        "status": "ok"
+      },
+      "conversion_rate": {
+        "formula": "sum(orders) / sum(visits)",
+        "value": 0.1,
+        "status": "ok"
+      },
+      "weighted_average": {
+        "formula": "sum(value * weight) / sum(weight)",
+        "numerator": 8.0,
+        "denominator": 2.0,
+        "value": 4.0,
+        "status": "ok"
+      },
+      "invalid_numeric": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      },
+      "missing_numeric": {
+        "revenue": 0,
+        "cost": 1,
+        "visits": 0,
+        "orders": 0,
+        "score": 1,
+        "weight": 0
+      },
+      "negative_value_rows": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      }
+    },
+    "west": {
+      "rows": 2,
+      "inputs": {
+        "revenue": 800.0,
+        "cost": 600.0,
+        "visits": 40.0,
+        "orders": 4.0
+      },
+      "gross_profit": {
+        "formula": "sum(revenue) - sum(cost)",
+        "value": 200.0,
+        "status": "ok"
+      },
+      "gross_margin": {
+        "formula": "gross_profit / sum(revenue)",
+        "value": 0.25,
+        "status": "ok"
+      },
+      "conversion_rate": {
+        "formula": "sum(orders) / sum(visits)",
+        "value": 0.1,
+        "status": "ok"
+      },
+      "weighted_average": {
+        "formula": "sum(value * weight) / sum(weight)",
+        "numerator": 15.0,
+        "denominator": 3.0,
+        "value": 5.0,
+        "status": "ok"
+      },
+      "invalid_numeric": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      },
+      "missing_numeric": {
+        "revenue": 1,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      },
+      "negative_value_rows": {
+        "revenue": 0,
+        "cost": 0,
+        "visits": 0,
+        "orders": 0,
+        "score": 0,
+        "weight": 0
+      }
+    }
+  }
+}
