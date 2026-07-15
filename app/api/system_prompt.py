@@ -25,6 +25,20 @@ class PromptUpdateRequest(BaseModel):
     content: str
 
 
+def _repair_mojibake(value: str) -> str:
+    """Repair legacy UTF-8 text decoded as Latin-1 one or two times."""
+    repaired = value
+    for _ in range(2):
+        try:
+            candidate = repaired.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            break
+        if candidate == repaired:
+            break
+        repaired = candidate
+    return repaired
+
+
 # 默认提示词文件路径
 DEFAULT_PROMPT_FILE = Path(__file__).parent.parent.parent / "system_prompt.md"
 PROMPT_NAME = "product_manager"
@@ -48,6 +62,13 @@ async def _ensure_prompt_exists() -> SystemPrompt:
             title=PROMPT_TITLE,
             content=default_content
         )
+    else:
+        repaired_title = _repair_mojibake(prompt.title)
+        repaired_content = _repair_mojibake(prompt.content)
+        if repaired_title != prompt.title or repaired_content != prompt.content:
+            prompt.title = repaired_title
+            prompt.content = repaired_content
+            await prompt.save()
     return prompt
 
 
@@ -85,6 +106,6 @@ async def get_active_system_prompt() -> str:
     """供 AgentService 调用：获取当前生效的系统提示词"""
     prompt = await SystemPrompt.filter(name=PROMPT_NAME).first()
     if prompt and prompt.content:
-        return prompt.content
+        return _repair_mojibake(prompt.content)
     # 回退到文件
     return await _get_default_prompt()
