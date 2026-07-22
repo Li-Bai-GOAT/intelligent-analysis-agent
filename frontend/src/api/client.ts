@@ -164,7 +164,14 @@ export class Api {
   }
 
   // Files
-  static async uploadFiles(sessionId: string, files: File[]) {
+  static async uploadFiles(sessionId: string, files: File[]): Promise<Array<{
+    id: string
+    filename: string
+    original_name: string
+    content_type: string | null
+    size: number
+    created_at: string
+  }>> {
     const formData = new FormData()
     for (const f of files) formData.append('files', f)
     const res = await fetch(`${API_BASE}/files/upload?session_id=${sessionId}`, {
@@ -173,7 +180,14 @@ export class Api {
       body: formData,
     })
     if (!res.ok) throw new Error('上传失败')
-    return res.json()
+    return res.json() as Promise<Array<{
+      id: string
+      filename: string
+      original_name: string
+      content_type: string | null
+      size: number
+      created_at: string
+    }>>
   }
 
   static listUploadedFiles(sessionId: string) {

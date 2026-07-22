@@ -17,16 +17,15 @@ export function InputArea() {
     }
   }, [text])
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!text.trim() || !currentSession) return
-    sendMessage(text.trim(), executionMode)
-    setText('')
+    if (await sendMessage(text.trim(), executionMode)) setText('')
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      handleSend()
+      void handleSend()
     }
   }
 
@@ -91,7 +90,7 @@ export function InputArea() {
         )}
 
         <button
-          onClick={isStreaming ? disconnectStream : handleSend}
+          onClick={isStreaming ? disconnectStream : () => void handleSend()}
           disabled={!isStreaming && (!text.trim() || !currentSession)}
           className={`p-2.5 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed
             ${isStreaming
