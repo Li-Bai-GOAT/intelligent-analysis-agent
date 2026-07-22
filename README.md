@@ -1,352 +1,285 @@
-# Data Agent
+# DataAgent
 
-**企业级智能数据分析平台** - 基于大语言模型 + 代码沙箱的自然语言数据处理解决方案
+> 面向企业数据分析场景的全栈智能体平台：将自然语言需求转化为可确认、可追踪、在隔离沙箱中执行的数据任务。
 
-通过对话式交互，让业务人员也能完成专业的数据清洗、统计分析、可视化报告等工作。
+DataAgent 让用户通过对话上传数据、描述分析目标，并在同一工作台中查看计划、执行过程、生成文件和最终结果。系统由 DataPM 负责理解和编排任务，由 KunCode 在 Docker 沙箱中完成数据处理、分析和报告生成。
 
----
-
-## ✨ 核心能力
-
-### 📊 数据分析
-| 能力 | 说明 |
-|------|------|
-| **数据探索** | 自动识别数据结构、字段类型、缺失值分布、数据质量评估 |
-| **描述性统计** | 均值、中位数、标准差、分位数、分布分析 |
-| **相关性分析** | Pearson/Spearman 相关系数、热力图可视化 |
-| **回归分析** | 线性回归、多元回归、逻辑回归 |
-| **假设检验** | t 检验、卡方检验、ANOVA 方差分析 |
-
-### 🔧 数据处理
-| 能力 | 说明 |
-|------|------|
-| **数据清洗** | 缺失值处理、异常值检测、重复数据去除、格式标准化 |
-| **数据转换** | 透视表、数据聚合、分组统计、时间序列处理 |
-| **多源整合** | 跨文件关联、多表合并、VLOOKUP 逻辑、字段映射 |
-| **数据库操作** | SQL 查询生成、数据提取、ETL 流程 |
-
-### 📈 高级分析
-| 能力 | 说明 |
-|------|------|
-| **聚类分析** | K-Means、层次聚类、DBSCAN |
-| **分类预测** | 决策树、随机森林、XGBoost |
-| **时间序列** | 趋势分解、季节性分析、ARIMA 预测 |
-| **因果分析** | 归因分析、连环替代法、杜邦分析、贡献度分析 |
-| **异常检测** | 统计异常、时序异常、离群点检测 |
-
-### � 可视化与报告
-| 能力 | 说明 |
-|------|------|
-| **图表生成** | 折线图、柱状图、饼图、散点图、热力图、桑基图、漏斗图 |
-| **交互式报告** | HTML 报告、Chart.js 可视化、TailwindCSS 美化 |
-| **自动化报告** | 周报/月报模板、管理层摘要、详细分析报告 |
-| **Office 导出** | Excel 多 Sheet 输出、Word 文档、PPT 演示文稿 |
+| 文档入口 | 说明 |
+| --- | --- |
+| [项目文档索引](docs/README.md) | 规划、整改和验收记录。 |
+| [运行与协作基线](AGENTS.md) | 当前架构、端口、数据边界、开发与验收要求。 |
+| [默认系统提示词](system_prompt.md) | DataPM 的默认行为约束。 |
 
 ---
 
-## �️ 技术架构
+## ✨ 核心价值
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           用户浏览器 (Web UI)                            │
-│         对话交互 · 文件上传 · 任务预览确认 · 结果展示与下载               │
-└─────────────────────────────────────────────────────────────────────────┘
-                                      │ HTTP/SSE
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        FastAPI 后端服务 (:8090)                          │
-│  ┌─────────────┐ ┌──────────────┐ ┌─────────────┐ ┌──────────────────┐  │
-│  │ 会话管理    │ │ 文件服务     │ │ 任务调度    │ │ 流式响应 (SSE)   │  │
-│  │ /sessions   │ │ /files       │ │ /conversation│ │ 实时输出推送     │  │
-│  └─────────────┘ └──────────────┘ └─────────────┘ └──────────────────┘  │
-│                                      │                                   │
-│  ┌───────────────────────────────────┴─────────────────────────────┐    │
-│  │                 AgentService (ReAct Agent)                       │    │
-│  │  · AgentScope 智能体框架        · 多轮对话状态管理               │    │
-│  │  · DeepSeek/GPT 大模型接入      · 计划笔记本 (Plan Notebook)     │    │
-│  │  · 工具自动调用 (Function Call) · 中断恢复机制                   │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
-          │                        │                          │
-          ▼                        ▼                          ▼
-┌──────────────────┐  ┌────────────────────┐  ┌────────────────────────────┐
-│   PostgreSQL     │  │      Redis         │  │     Celery Worker          │
-│  · 会话持久化    │  │  · 任务状态缓存    │  │  · 异步任务执行            │
-│  · 消息历史存储  │  │  · 中断信号传递    │  │  · 任务超时管理            │
-│  · Agent 状态    │  │  · 预览确认状态    │  │  · 自动继续机制            │
-└──────────────────┘  └────────────────────┘  └────────────────────────────┘
-                                                              │
-┌─────────────────────────────────────────────────────────────┴───────────┐
-│                   AgentScope Runtime Sandbox Server                      │
-│                           (代码沙箱 :10001)                              │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │  DataAnalysisSandbox (自定义沙箱扩展)                             │   │
-│  │  · run_kuncode    → 委派 KunCode AI 执行数据分析任务              │   │
-│  │  · run_ipython    → 直接执行 Python 代码                          │   │
-│  │  · run_shell      → 执行 Shell 命令                               │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                    │                                     │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │              隔离 Docker 容器 (数据分析运行时)                     │   │
-│  │  预装: pandas · numpy · matplotlib · seaborn · scikit-learn      │   │
-│  │        scipy · statsmodels · openpyxl · xlrd · plotly            │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                    │                                     │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │                    SKILL 技能包 (可扩展分析能力)                   │   │
-│  │  · 连环替代法   · 异常检测     · 聚类分析    · 相关性分析         │   │
-│  │  · 贡献度分析   · 决策树规则   · 漏斗分析    · AB 对比分析        │   │
-│  │  · Chart.js 图表生成  · Excel/Word/PPT 导出                       │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │ MCP Protocol
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     MCP Knowledge Server (:8765)                         │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │  search_knowledge(query, category, top_k)                         │   │
-│  │  类别: 计算公式 | 概念定义 | 分析方法 | 报告模板                   │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                    │                                     │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │           Milvus 向量数据库 + Embedding 模型                      │   │
-│  │           企业知识库 · 业务公式 · 分析模板                        │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
+- **自然语言驱动分析**：把“清洗这份销售数据并生成趋势报告”转化为受控的分析任务。
+- **过程可见且可控**：以 SSE 流式展示思考、计划、工具调用与执行结果，并在关键步骤引入人工确认。
+- **执行环境隔离**：用户任务代码和 KunCode 在 Docker 容器中运行，主机只负责调度、状态管理和交付。
+- **会话级工作区**：上传文件、执行上下文和生成文件按会话绑定，统一通过鉴权 API 访问。
+- **可扩展能力平台**：知识库、Agent、Skill、MCP 与系统提示词可在管理后台维护，并注入沙箱运行时。
+
+## 🧩 功能概览
+
+| 模块 | 主要能力 |
+| --- | --- |
+| 对话工作台 | 登录、会话管理、流式回答、任务状态、工具终端、计划和文件三态面板。 |
+| 数据分析执行 | 在沙箱中执行数据清洗、统计分析、相关性/聚类/贡献度等任务，生成图表与报告。 |
+| Human-in-the-Loop | 支持计划预览、KunCode 任务描述预览、编辑确认、取消、超时与中断处理。 |
+| 文件交付 | 上传文件、浏览工作区、预览/编辑文本内容、下载单个文件或整个工作区 ZIP。 |
+| 知识库 | 在 PostgreSQL 保存正文，在 Milvus 保存可重建向量索引，用于知识检索增强。 |
+| 管理后台 | 管理知识库、系统提示词、Agent、Skill、MCP 及其沙箱注入。 |
+
+---
+
+## 🏗️ 当前系统架构
+
+```mermaid
+flowchart LR
+    User["用户浏览器"] --> FE["React 19 + Vite 工作台"]
+    FE -->|"HTTP / SSE · /api/*"| API["FastAPI :8090"]
+    API --> PM["DataPM\n任务理解与编排"]
+    PM --> SB["AgentScope Runtime Sandbox :10001"]
+    SB --> KC["Docker 容器中的 KunCode\n数据处理与文件生成"]
+
+    API <--> PG["PostgreSQL :5488\n业务事实数据"]
+    API <--> Redis["Redis :6380\n任务流 / HITL / 运行状态"]
+    API <--> Milvus["Milvus :19530\n知识向量索引"]
+    Milvus <--> Embedding["Ollama Embedding :9997"]
+    KC --> Workspace["会话绑定工作区"]
+    Workspace -->|"认证文件 API"| FE
 ```
 
----
+### 组件职责
 
-## 🎯 技术亮点
-
-### DataPM + KunCode 委派架构
-| 组件 | 角色 | 职责 |
-|------|------|------|
-| **DataPM** | 外层任务协调器 | 需求理解、计划制定、任务拆解、质量把控 |
-| **KunCode** | 沙箱内执行器 | 代码实现、数据处理、报告生成、结果输出 |
-
-### Human-in-the-Loop (HITL)
-- **计划预览**：复杂任务自动生成分析计划，用户可编辑确认
-- **任务预览**：代码执行前展示任务描述，支持修改后执行
-- **中断恢复**：支持随时中断任务，保留已完成的中间结果
-
-### 安全沙箱执行
-- **Docker 隔离**：代码在独立容器中执行，保护主机安全
-- **资源限制**：CPU、内存、执行时间限制
-- **权限控制**：禁止危险操作 (rm -rf、系统修改等)
-
-### 可扩展 SKILL 体系
-- **插件化设计**：分析算法封装为独立 SKILL，即插即用
-- **知识沉淀**：业务公式、分析模板、最佳实践可配置化
-- **MCP 集成**：通过 Model Context Protocol 接入企业知识库
+| 层级 | 当前实现 | 职责 |
+| --- | --- | --- |
+| 前端 | React 19、TypeScript、Vite、Zustand、Tailwind CSS | 对话、会话、SSE 状态、计划/文件/终端面板与管理后台。 |
+| API | FastAPI、Pydantic Settings、Tortoise ORM | JWT 鉴权、领域 API、SSE、健康检查和 React 生产构建产物托管。 |
+| 智能体 | AgentScope、DataPM | 需求理解、上下文管理、工具选择、计划生成与任务编排。 |
+| 执行 | AgentScope Runtime、KunCode、Docker | 会话级隔离执行、数据处理、文件生成和流式结果返回。 |
+| 存储 | PostgreSQL、Redis、Milvus、Ollama | 业务事实、运行状态、可重建向量索引与 Embedding。 |
 
 ---
 
-## 📁 支持的数据格式
+## 🔄 一次任务如何完成
 
-| 类型 | 格式 |
-|------|------|
-| **表格数据** | Excel (.xlsx, .xls)、CSV、TSV、Parquet |
-| **文本数据** | JSON、XML、TXT、Markdown |
-| **数据库** | MySQL、PostgreSQL、SQLite、通过代码连接更多 |
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant W as React 工作台
+    participant A as FastAPI
+    participant P as DataPM
+    participant S as 沙箱 / KunCode
+    participant D as PostgreSQL / Redis
 
----
-
-## 🚀 快速开始
-
-### 环境要求
-- Python 3.12+
-- Docker（代码沙箱环境）
-- PostgreSQL、Redis
-
-### 安装部署
-
-```bash
-# 0. 安装docker和必须的镜像和容器
-
-## redis
-docker pull redis:7-alpine
-
-docker run -d \
-  --name data_analysis_redis \
-  --restart always \
-  -p 6380:6379 \
-  -v data_analysis_redis_data:/data \
-  -e REDIS_PASSWORD=password \
-  redis:7-alpine \
-  redis-server --requirepass password --appendonly yes
-
-
-## pgsql
-docker pull postgres:16
-
-docker run -d \
-  --name data_analysis_postgres \
-  --restart always \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=password \
-  -e POSTGRES_DB=data_analysis \
-  -v data_analysis_pgdata:/var/lib/postgresql/data \
-  -p 5488:5432 \
-  --restart unless-stopped \
-  postgres:16
-
-
-## 安装 Milvus：
-wget https://github.com/milvus-io/milvus/releases/download/v2.6.9/milvus-standalone-docker-compose.yml -O docker-compose.yml
-
-wget https://raw.githubusercontent.com/milvus-io/milvus/master/configs/milvus.yaml -O milvus.yaml
-
-### 编辑 milvus.yaml，找到 common.security 部分，修改为：
-common:
-  security:
-    authorizationEnabled: true  # 将 false 改为 true
-
-### 修改 docker-compose.yml，在 standalone 服务中添加卷映射：
-volumes:
-  - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
-  - ./milvus.yaml:/milvus/configs/milvus.yaml  # 添加这一行
-
-### 启动
-sudo docker compose up -d
-
-### 停止
-sudo docker compose down
-
-
-# 1. 安装依赖
-uv sync
-
-
-# 2. 配置环境变量
-cp .env.example .env
-# 编辑 .env 填写数据库、API Key 等配置
-
-
-# 3. 构建沙箱镜像（首次部署）
-cd sandbox_image
-
-runtime-sandbox-builder data_analysis \
-    --dockerfile_path Dockerfile \
-    --extension ../data_analysis_sandbox.py
-
-## 编辑 sanbox.env中的redis和API Key
-vim sandbox.env
-
-
-# 4. 启动沙箱服务
-./start_sandbox_server.sh start
-
-
-# 5. 启动主服务
-./start.sh start
-
-
-# 6. 构建向量数据库集合：
-python scripts/rebuild_milvus_from_postgres.py
+    U->>W: 输入需求，可选上传数据文件
+    W->>A: 提交会话与对话请求
+    A->>D: 校验 JWT、会话归属并写入状态
+    A->>P: 创建或复用会话绑定的沙箱
+    P-->>W: SSE：文本、状态、计划、工具调用
+    opt 需要人工确认
+        P-->>W: plan_preview / kuncode_preview
+        U->>W: 编辑后确认或取消
+        W->>A: 提交确认结果
+    end
+    P->>S: 在容器工作区执行 KunCode
+    S-->>P: 流式输出、工具结果和生成文件路径
+    P->>D: 持久化消息、任务事件与终态
+    P-->>W: SSE：tool_result / generated_files / end
+    W->>A: 认证后预览或下载交付文件
 ```
 
-访问 **http://localhost:8090** 开始使用
+### 关键流程说明
 
-### 服务管理
+1. 用户登录后，前端保存 JWT 并加载可访问的历史会话。
+2. 上传文件与当前用户、会话和沙箱绑定关系关联；所有文件访问经过后端权限校验。
+3. `POST /api/conversation/chat` 用于直接 SSE 对话。长任务可使用 `POST /api/conversation/async` 提交，并从 `GET /api/conversation/stream/{task_id}` 恢复订阅。
+4. `execution_mode=auto` 由 DataPM 判断是否调用工具；`execution_mode=kuncode` 则直接进入 KunCode 执行路径。
+5. 复杂任务可以先给出计划，或在执行前展示可编辑的 KunCode 任务描述。只有确认后才继续执行。
+6. KunCode 在 Docker 沙箱的会话工作区中运行；服务端只将相对工作区路径以 `generated_files` 事件通知前端。
+7. 正常、失败和中断路径都会写入明确终态，避免界面永久显示“执行中”。
 
-```bash
-./start.sh start    # 启动所有服务 (API + Celery + MCP)
-./start.sh stop     # 停止服务
-./start.sh restart  # 重启服务
-./start.sh status   # 查看状态
-```
+### SSE 事件契约
 
-### Windows PowerShell
+前后端共享 `frontend/src/types/index.ts` 中的流式事件定义。常见事件包括：
 
-先启动 PostgreSQL、Redis 和 Milvus 的 Docker 容器，然后使用原生 PowerShell 脚本管理 Sandbox 与主服务：
+`text`、`thinking`、`status`、`tool_call`、`tool_result`、`plan`、`plan_preview`、`kuncode_preview`、`generated_files`、`error`、`interrupted` 和 `end`。
 
-```powershell
-docker compose -f .\milvus\docker-compose.yml up -d
-docker compose -f .\embedding\docker-compose.yml up -d
-docker exec dataagent-ollama ollama pull qwen3-embedding:0.6b
-.\scripts\start.ps1 -Action up
-.\scripts\start.ps1 -Action status
-.\scripts\start.ps1 -Action logs -Service main
-.\scripts\start.ps1 -Action down
-```
-
-`up` 会等待 `10001` Sandbox 和 `8090/ready` 通过，而不是仅依赖固定延时或进程 PID。
-
-Embedding 默认使用 `qwen3-embedding:0.6b` 和 1024 维向量。除 Docker 方式外，启动脚本也会自动识别
-`..\.runtime\ollama\bin\ollama.exe`，在 `9997` 端口启动本地 Ollama，并将模型保存到
-`..\.runtime\ollama\models`。
+同一次工具调用通过稳定的 `tool_id` 关联 `tool_call` 与 `tool_result`，前端据此原位更新终端记录，避免重复渲染。
 
 ---
 
-## 📖 使用示例
+## 🔐 数据与安全边界
 
-**数据探索**
-> "帮我看看这个 Excel 文件的数据结构，有哪些字段，数据质量怎么样"
+| 资源 | 事实来源与访问方式 |
+| --- | --- |
+| PostgreSQL | 用户、会话、消息、知识正文、系统提示词、Agent/Skill/MCP 元数据、文件元数据与沙箱绑定的业务事实来源。 |
+| Redis | 任务流、HITL 确认、活跃任务和可重放运行事件；不是长期业务数据的唯一来源。 |
+| Milvus | 从 PostgreSQL 知识正文构建的派生向量索引，可重建。 |
+| 会话工作区 | 上传和生成文件的运行期位置；通过鉴权 API 浏览、预览和下载，不直接暴露宿主机绝对路径。 |
+| Docker 沙箱 | 用户代码、Shell 和 KunCode 的执行边界；不允许让模型生成的命令直接在宿主机运行。 |
 
-**统计分析**
-> "计算各产品线的销售额均值、中位数，并按地区分组统计"
-
-**可视化**
-> "画一个折线图展示过去12个月的销售趋势，按产品类型分组"
-
-**数据处理**
-> "把这两个表按客户ID关联，合并成一个完整的客户订单表"
-
-**高级分析**
-> "用连环替代法分析本月销售额下降的原因，分解价格、销量、结构因素的贡献"
-
-**报告生成**
-> "生成一份本周销售数据的分析报告，包含趋势图表和异常点标注"
-
----
-
-## 📂 目录结构
-
-```
-├── app/                         # 后端服务
-│   ├── api/                     # API 路由 (会话、文件、对话、计划等)
-│   ├── services/                # 业务逻辑 (AgentService、文件服务等)
-│   ├── models/                  # 数据模型 (Tortoise ORM)
-│   └── repositories/            # 数据访问层
-├── frontend/                    # Web 前端
-│   ├── index.html               # 主页面
-│   ├── js/app.js                # 前端逻辑
-│   └── css/style.css            # 样式
-├── mcp_knowledge_server/        # MCP 知识库服务
-├── sandbox_image/               # 沙箱 Docker 镜像配置
-├── system_prompt.md             # DataPM 系统提示词
-├── data_analysis_sandbox.py     # 自定义沙箱扩展
-└── start.sh                     # 服务管理脚本
-```
-
----
-
-## 🔧 配置说明
-
-| 文件 | 说明 |
-|------|------|
-| `.env` | 环境变量 (数据库、API Key、模型配置等) |
-| `sandbox.env` | 沙箱服务配置 |
-
-默认只向外层 Agent 暴露 `run_kuncode`。调试时可通过 `ENABLE_AGENT_PYTHON_TOOL=true` 或 `ENABLE_AGENT_SHELL_TOOL=true` 临时恢复 Python/Shell 工具。
+Milvus 或 Embedding 不可用时，知识库功能会降级；基础对话不应因此被阻断。`.env`、`sandbox.env` 中的 API Key、Token 和密码不得写入源码、文档、日志或提交记录。
 
 ---
 
 ## 🛠️ 技术栈
 
-| 组件 | 技术选型 |
-|------|----------|
-| **后端框架** | FastAPI + Celery |
-| **智能体框架** | AgentScope (ReAct Agent) |
-| **大模型** | DeepSeek / GPT-4 / Claude (可配置) |
-| **数据库** | PostgreSQL + Redis |
-| **向量数据库** | Milvus |
-| **代码沙箱** | AgentScope Runtime + Docker |
-| **前端** | 原生 JS + Prism.js + SheetJS |
+| 分类 | 技术 |
+| --- | --- |
+| 前端 | React 19、TypeScript、Vite 8、Zustand、Tailwind CSS、React Markdown。 |
+| 后端 | Python 3.12+、FastAPI、Tortoise ORM、asyncpg、Redis asyncio、Pydantic Settings。 |
+| 智能体与执行 | AgentScope、AgentScope Runtime、KunCode、Docker Desktop。 |
+| 数据服务 | PostgreSQL 16、Redis 7、Milvus 2.5、Ollama `qwen3-embedding:0.6b`。 |
+| 文件能力 | SheetJS、Mammoth、pdf.js、PptxJS、JSZip。 |
+
+模型层支持 DeepSeek、MiniMax、OpenAI、Anthropic 与 Mimo；实际提供商、模型和密钥均从 `.env` 读取。
 
 ---
 
-## 📜 License
+## 🚀 本地运行（Windows 主线）
+
+项目当前以 **Windows 宿主机 + Docker Desktop** 为主运行环境：主服务和 Sandbox Manager 由 PowerShell 脚本管理，PostgreSQL、Redis、Milvus 和隔离容器由 Docker 提供。
+
+### 前置条件
+
+- Python 3.12+、Node.js、`uv`、Docker Desktop。
+- PostgreSQL 与 Redis 已按 `.env` 配置启动；当前本地运行基线使用 PostgreSQL `5488`、Redis `6380`。
+- 首次执行代码任务前已构建 `data_analysis` 沙箱镜像。
+- Milvus 与 Ollama Embedding 为知识库链路所需组件；其不可用会在健康检查中显示为降级。
+
+### 首次安装
+
+```powershell
+cd E:\Full_Stack_Challenge\dataagent
+
+# 后端依赖
+uv sync
+
+# 前端依赖与生产构建
+cd frontend
+npm.cmd ci
+npm.cmd run build
+cd ..
+
+# 本地配置：填写数据库、模型与沙箱配置，切勿提交
+Copy-Item .env.example .env
+```
+
+首次构建隔离沙箱镜像：
+
+```powershell
+.\.venv\Scripts\runtime-sandbox-builder.exe data_analysis `
+  --dockerfile_path .\sandbox_image\Dockerfile `
+  --extension .\data_analysis_sandbox.py
+```
+
+### 启动、查看与停止
+
+```powershell
+# 启动依赖服务
+docker start data_analysis_postgres data_analysis_redis
+docker compose -f .\milvus\docker-compose.yml up -d
+
+# 启动 Sandbox Manager 与 FastAPI
+.\scripts\start.ps1 -Action up
+
+# 服务状态与日志
+.\scripts\start.ps1 -Action status
+.\scripts\start.ps1 -Action logs -Service main
+.\scripts\start.ps1 -Action logs -Service sandbox
+
+# 重启或停止脚本管理的服务
+.\scripts\start.ps1 -Action restart
+.\scripts\start.ps1 -Action down
+```
+
+- 应用入口：[http://127.0.0.1:8090](http://127.0.0.1:8090)
+- FastAPI 文档：[http://127.0.0.1:8090/docs](http://127.0.0.1:8090/docs)
+- 健康检查：[http://127.0.0.1:8090/ready](http://127.0.0.1:8090/ready)
+
+生产模式下 FastAPI 提供 `frontend/dist`。前端变更后必须重新运行 `npm.cmd run build`。
+
+### 前端开发模式
+
+后端保持在 `8090` 运行，再启动 Vite：
+
+```powershell
+cd frontend
+npm.cmd run dev
+```
+
+Vite 会将 `/api` 和 `/ready` 代理至 `8090`。
+
+---
+
+## ✅ 健康检查与验证
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8090/ready | ConvertTo-Json -Depth 4
+Invoke-WebRequest http://127.0.0.1:9091/healthz
+Invoke-RestMethod http://127.0.0.1:9997/v1/models
+```
+
+`/ready` 将 PostgreSQL、Redis 和 Sandbox 作为基础可用性依赖；Milvus 与 Embedding 可以显示 `degraded`，表示知识库链路受限，而非基础对话必然不可用。
+
+最低回归验证：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_task_regressions -v
+
+cd frontend
+npm.cmd run lint
+npm.cmd run build
+```
+
+涉及对话、KunCode、文件或管理后台的改动，还应完成：登录 → 创建会话 → 真实接口调用 → 检查终态 → 从文件面板打开或下载实际产物。
+
+---
+
+## 📁 关键目录
+
+```text
+dataagent/
+├── app/
+│   ├── api/                 # 认证、会话、对话、文件、计划、知识库与沙箱管理 API
+│   ├── models/              # Tortoise ORM 模型
+│   ├── repositories/        # PostgreSQL 数据访问层
+│   ├── services/            # Agent、模型、沙箱注入、清理与业务编排
+│   ├── main.py              # FastAPI 入口、健康检查与 SPA 托管
+│   └── tasks.py             # Windows / Celery 长任务执行策略
+├── frontend/src/
+│   ├── admin/               # 管理后台
+│   ├── components/          # 认证、聊天、布局和右侧面板
+│   ├── stores/              # 认证、会话、SSE 任务和 UI 状态
+│   └── types/               # 事件与领域类型契约
+├── sandbox_image/           # 数据分析容器镜像定义
+├── sandbox_skills/          # 可注入的内置 Skill 与资源
+├── milvus/                  # Milvus Docker Compose 配置
+├── scripts/start.ps1        # Windows 服务生命周期脚本
+├── docs/                    # 规划、整改与验收记录
+├── system_prompt.md         # DataPM 默认系统提示词
+└── AGENTS.md                # 当前运行与开发约束基线
+```
+
+---
+
+## 🎤 面试速览
+
+可以用下面这段介绍项目：
+
+> DataAgent 是一个将自然语言数据需求转化为受控沙箱任务的全栈智能体平台。前端使用 React 通过 SSE 展示任务过程，FastAPI 负责鉴权、会话、任务流和文件交付；DataPM 负责需求理解与工具编排，KunCode 在会话绑定的 Docker 沙箱中完成实际分析。PostgreSQL 保存业务事实，Redis 支撑可恢复任务流和人工确认，Milvus 提供可重建的知识库向量检索，从而兼顾易用性、可追踪性和执行隔离。
+
+建议按以下顺序熟悉项目：
+
+1. 本 README：项目目标、架构、核心流程与运行方式。
+2. [AGENTS.md](AGENTS.md)：端口、事件协议、数据所有权和验收要求。
+3. `app/services/agent_service.py` 与 `app/tasks.py`：智能体、沙箱和长任务关键实现。
+4. `frontend/src/stores/session.ts` 与 `frontend/src/types/index.ts`：SSE 如何驱动前端状态。
+5. [docs/README.md](docs/README.md)：历次优化、整改与验收记录。
+
+## License
 
 MIT License

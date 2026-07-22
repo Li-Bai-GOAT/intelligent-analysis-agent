@@ -92,6 +92,17 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(direct.execution_mode, "kuncode")
 
+    async def test_uploaded_file_hint_contains_exact_sandbox_path(self):
+        service = AgentService()
+        hint = service._build_file_hint([
+            "/workspace/data/uploads/sales report.xlsx",
+            "/workspace/data/uploads/customers.csv",
+        ])
+
+        self.assertIn("/workspace/data/uploads/sales report.xlsx", hint)
+        self.assertIn("/workspace/data/uploads/customers.csv", hint)
+        self.assertIn("可以直接使用这些文件路径进行分析", hint)
+
     async def test_workspace_path_check_rejects_prefix_collision(self):
         self.assertTrue(_is_within_workspace(r"C:\data\workspace\report.txt", r"C:\data\workspace"))
         self.assertFalse(_is_within_workspace(r"C:\data\workspace-secret\report.txt", r"C:\data\workspace"))

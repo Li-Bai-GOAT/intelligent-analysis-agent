@@ -70,7 +70,7 @@ interface SessionState {
   selectSession: (sessionId: string) => Promise<void>
   createSession: () => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
-  sendMessage: (content: string, executionMode?: 'auto' | 'kuncode') => Promise<void>
+  sendMessage: (content: string, executionMode?: 'auto' | 'kuncode') => Promise<boolean>
   addPendingFiles: (files: File[]) => void
   removePendingFile: (index: number) => void
   clearPendingFiles: () => void
@@ -279,32 +279,45 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   sendMessage: async (content: string, executionMode = 'auto') => {
     const state = get()
-    if (!state.currentSession || state.isStreaming) return
+    if (!state.currentSession || state.isStreaming) return false
 
     let fileIds: string[] = []
+    let uploadedFiles: Awaited<ReturnType<typeof Api.uploadFiles>> = []
     if (state.pendingFiles.length > 0) {
       try {
-        const result = await Api.uploadFiles(state.currentSession, state.pendingFiles)
-        fileIds = result.file_ids || []
+        uploadedFiles = await Api.uploadFiles(state.currentSession, state.pendingFiles)
+        fileIds = uploadedFiles.map((file) => String(file.id))
       } catch (err) {
         console.error('Upload error:', err)
+        set((current) => ({
+          messages: [
+            ...current.messages,
+            { role: 'system', content: err instanceof Error ? `文件上传失败：${err.message}` : '文件上传失败，请重试。' },
+          ],
+        }))
+        return false
       }
     }
 
     const userMsg: Message = {
       role: 'user',
       content,
-      files: state.pendingFiles.map((f) => ({
-        file_id: '',
-        filename: f.name,
-        size: f.size,
+      files: uploadedFiles.map((file) => ({
+        file_id: String(file.id),
+        filename: file.original_name || file.filename,
+        size: file.size,
+        mime_type: file.content_type || undefined,
       })),
     }
-    set({ messages: [...state.messages, userMsg], pendingFiles: [], uploadedFileIds: fileIds })
 
     try {
       set({ isStreaming: true })
       const result = await Api.submitTask(state.currentSession, content, fileIds, executionMode)
+      set((current) => ({
+        messages: [...current.messages, userMsg],
+        pendingFiles: [],
+        uploadedFileIds: fileIds,
+      }))
       console.log('[SessionStore] task submitted:', result.task_id)
       const eventSource = Api.streamTask(
         result.task_id,
@@ -312,9 +325,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         () => set({ isStreaming: false }),
       )
       set({ currentEventSource: eventSource })
+      return true
     } catch (err) {
       console.error('Send error:', err)
-      set({ isStreaming: false })
+      set((current) => ({
+        isStreaming: false,
+        messages: [
+          ...current.messages,
+          { role: 'system', content: err instanceof Error ? `消息发送失败：${err.message}` : '消息发送失败，请重试。' },
+        ],
+      }))
+      return false
     }
   },
 

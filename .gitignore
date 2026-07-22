@@ -28,7 +28,7 @@ runtime_sandbox_storage/
 .pids/
 
 # ==================== 文档构建产物 ====================
-docs/
+docs/_build/
 
 # ==================== Docker 镜像 / 大文件 / 二进制资源 ====================
 sandbox_image/*.tar
