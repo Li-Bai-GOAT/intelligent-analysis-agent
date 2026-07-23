@@ -12,6 +12,7 @@ from app.api.files import _is_within_workspace
 from app.repositories.session_repo import SessionRepository
 from app.services.agent_service import (
     AgentService,
+    _build_terminal_tool_results,
     _build_kuncode_completion_message,
     _extract_workspace_files,
 )
@@ -33,6 +34,9 @@ class FakeRedis:
 
     async def expire(self, key, seconds):
         self.expirations[key] = seconds
+
+    async def delete(self, key):
+        self.values.pop(key, None)
 
 
 class FakeStreamRedis(FakeRedis):
@@ -103,6 +107,20 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/workspace/data/uploads/customers.csv", hint)
         self.assertIn("可以直接使用这些文件路径进行分析", hint)
 
+    async def test_pending_tool_calls_receive_terminal_results(self):
+        events = _build_terminal_tool_results({
+            "call-1": "run_kuncode",
+            "call-2": "search_knowledge",
+        })
+
+        self.assertEqual([event["type"] for event in events], ["tool_result", "tool_result"])
+        self.assertEqual([event["tool_id"] for event in events], ["call-1", "call-2"])
+        self.assertTrue(all(event["execution_status"] == "failed" for event in events))
+        self.assertIn("未返回完整执行结果", events[0]["content"])
+
+        cancelled = _build_terminal_tool_results({"call-1": "run_kuncode"}, status="cancelled")
+        self.assertEqual(cancelled[0]["execution_status"], "cancelled")
+
     async def test_workspace_path_check_rejects_prefix_collision(self):
         self.assertTrue(_is_within_workspace(r"C:\data\workspace\report.txt", r"C:\data\workspace"))
         self.assertFalse(_is_within_workspace(r"C:\data\workspace-secret\report.txt", r"C:\data\workspace"))
@@ -154,6 +172,31 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["phase"], "started")
         self.assertEqual(event["execution_status"], "running")
         self.assertTrue(event["event_id"].startswith("evt_"))
+
+    async def test_tool_result_stream_is_terminal_by_default(self):
+        stream_redis = FakeStreamRedis()
+        with patch("app.services.agent_service.aioredis.from_url", return_value=stream_redis):
+            service = AgentService()
+            await service.write_task_stream(
+                "task-1",
+                {"type": "tool_result", "tool_id": "call-1", "content": "done"},
+                "session-1",
+            )
+
+        event = json.loads(stream_redis.entries[0][1]["data"])
+        self.assertEqual(event["phase"], "completed")
+        self.assertEqual(event["execution_status"], "completed")
+
+    async def test_clear_session_task_only_clears_matching_task(self):
+        service = AgentService()
+        service._redis = FakeRedis()
+        service._redis.values["session_task:session-1"] = "new-task"
+
+        await service.clear_session_task("session-1", "old-task")
+        self.assertEqual(await service.get_session_task("session-1"), "new-task")
+
+        await service.clear_session_task("session-1", "new-task")
+        self.assertIsNone(await service.get_session_task("session-1"))
 
     async def test_session_owner_rejects_unknown_session(self):
         with patch.object(SessionRepository, "get", new=AsyncMock(return_value=None)):

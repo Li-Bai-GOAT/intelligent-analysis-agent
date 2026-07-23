@@ -145,7 +145,10 @@ function parseOutput(raw?: string): string {
   return stripAnsi(raw)
 }
 
-function getStatus(output: string, result?: string): ToolStatus {
+function getStatus(output: string, result?: string, executionStatus?: ToolCall['execution_status']): ToolStatus {
+  if (executionStatus === 'running') return 'running'
+  if (executionStatus === 'failed' || executionStatus === 'cancelled') return 'error'
+  if (executionStatus === 'completed') return 'success'
   if (result === undefined) return 'running'
   const lower = output.toLowerCase()
   if (
@@ -448,7 +451,7 @@ export function TerminalPanel() {
         const meta = getMeta(tool.name)
         const input = parseInput(tool.name, tool.arguments || '')
         const output = parseOutput(tool.result)
-        const status = getStatus(output, tool.result)
+        const status = getStatus(output, tool.result, tool.execution_status)
         collected.push({
           id: tool.id || `${tool.name}-${collected.length}`,
           name: tool.name,

@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import { ChevronRight, Loader2, Wrench, User, Bot } from 'lucide-react'
+import { ChevronRight, User, Bot } from 'lucide-react'
 import type { Message } from '../../types'
 
 interface MessageBubbleProps {
@@ -54,24 +54,7 @@ function AssistantMessage({ message }: MessageBubbleProps) {
           <Bot size={14} />
         </div>
         <div className="flex flex-col gap-2 min-w-0">
-          {message.thinking && <ThinkingBlock content={message.thinking} />}
-          {(() => {
-            const skipNames = new Set(['ask_user', 'view_historical_plans', 'create_plan', 'confirm_plan', 'ask_user_confirm'])
-            const visibleCalls = (message.tool_calls || []).filter((tc) => {
-              if (skipNames.has(tc.name)) return false
-              const args = tc.arguments || ''
-              if (args === '{}' || args === '' || args === '{"code":""}' || args === '{"command":""}') return false
-              return true
-            })
-            if (visibleCalls.length === 0) return null
-            return (
-              <div className="flex flex-col gap-1.5">
-                {visibleCalls.map((tc) => (
-                  <ToolCallBlock key={tc.id} name={tc.name} args={tc.arguments} result={tc.result} />
-                ))}
-              </div>
-            )
-          })()}
+          {message.thinking && <ThinkingBlock content={message.thinking} running={message.status === 'running'} />}
           {message.content && (
             <div className="px-3.5 py-2.5 rounded-xl rounded-tl-md bg-bg-surface border border-border text-sm leading-relaxed">
               <MarkdownContent content={message.content} />
@@ -93,7 +76,7 @@ function SystemMessage({ message }: MessageBubbleProps) {
   )
 }
 
-function ThinkingBlock({ content }: { content: string }) {
+function ThinkingBlock({ content, running }: { content: string; running: boolean }) {
   const [expanded, setExpanded] = useState(false)
 
   return (
@@ -103,49 +86,11 @@ function ThinkingBlock({ content }: { content: string }) {
         className="flex items-center gap-2 px-3 py-2 w-full text-xs text-warning/80 hover:text-warning transition-colors cursor-pointer"
       >
         <ChevronRight size={12} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
-        <span className="font-medium">思考过程</span>
+        <span className="font-medium">{running ? '正在分析' : '思考过程'}</span>
       </button>
       {expanded && (
         <div className="px-3 pb-2.5 text-xs text-warning/70 max-h-60 overflow-y-auto whitespace-pre-wrap leading-relaxed">
           {content}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ToolCallBlock({ name, args, result }: { name: string; args: string; result?: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const safeArgs = typeof args === 'string' ? args : JSON.stringify(args || '')
-
-  return (
-    <div className="rounded-lg bg-bg-elevated border border-border overflow-hidden">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 px-3 py-2 w-full text-xs text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
-      >
-        {result !== undefined ? (
-          <Wrench size={12} className="text-accent" />
-        ) : (
-          <Loader2 size={12} className="text-warning animate-spin" />
-        )}
-        <span className="font-medium">{name}</span>
-        <span className="text-text-muted text-[10px] truncate flex-1 text-left">{safeArgs.slice(0, 60)}</span>
-        <ChevronRight size={12} className={`transition-transform text-text-muted ${expanded ? 'rotate-90' : ''}`} />
-      </button>
-      {expanded && (
-        <div className="px-3 pb-2.5">
-          <pre className="text-[11px] text-text-muted bg-bg-base rounded-md p-2.5 overflow-x-auto max-h-48 leading-relaxed">
-            {safeArgs}
-          </pre>
-          {result !== undefined && (
-            <>
-              <div className="text-[10px] text-text-muted mt-2 mb-1 font-medium">结果</div>
-              <pre className="text-[11px] text-text-secondary bg-bg-base rounded-md p-2.5 overflow-x-auto max-h-48 leading-relaxed">
-                {result}
-              </pre>
-            </>
-          )}
         </div>
       )}
     </div>

@@ -15,6 +15,7 @@
 | [项目缺陷整改指导](plans/project-remediation-guide.md) | 历史问题基线与分阶段整改路线 | 实施前以当前代码和可复现验证结果为准。 |
 | [管理后台前端重构方案](plans/admin-ui-refactor-plan.md) | 管理后台的信息架构与重构计划 | 作为规划参考，不代表所有阶段均已落地。 |
 | [数据分析 Skill / 知识库 E2E 执行计划](plans/data-skill-knowledge-e2e-plan.md) | 数据技能和知识库的端到端执行计划 | 已有对应验收报告可供对照。 |
+| [单轮对话聚合与 KunCode 结束态修复计划](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 修复一问多思考/多回答、过度规划与 KunCode 永久运行态 | 按状态协议、回合投影、提示词和真实浏览器矩阵分阶段实施。 |
 
 ## 验收报告
 

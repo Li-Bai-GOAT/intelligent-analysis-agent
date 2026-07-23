@@ -150,11 +150,13 @@ async def submit_async_task(
         "execution_mode": data.execution_mode,
     }
 
-    # Store task ownership before scheduling so only the authenticated session
-    # can attach to the stream returned by this endpoint.
+    # Register ownership and the active task before scheduling. A very fast
+    # task may otherwise finish and clear the key before this endpoint writes
+    # it, leaving a stale "active" task behind.
     agent_service = AgentService.get_instance()
     await agent_service.start()
     await agent_service.set_task_owner(task_id, str(user.id), data.session_id)
+    await agent_service.set_session_task(data.session_id, task_id)
 
     # Windows 下使用本地执行器，非 Windows 使用 Celery
     if platform.system() == "Windows":
@@ -167,12 +169,7 @@ async def submit_async_task(
         )
     else:
         # Celery 异步提交
-        result = celery_analyze_task.delay(request_dict)
-        task_id = result.id
-        await agent_service.set_task_owner(task_id, str(user.id), data.session_id)
-
-    # 记录会话的当前任务
-    await agent_service.set_session_task(data.session_id, task_id)
+        celery_analyze_task.apply_async(args=[request_dict], task_id=task_id)
 
     return AsyncTaskResponse(
         task_id=task_id,

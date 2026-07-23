@@ -18,6 +18,8 @@ export interface Message {
   files?: UploadedFile[]
   tool_calls?: ToolCall[]
   thinking?: string
+  turnId?: string
+  status?: ToolExecutionStatus
 }
 
 export interface UploadedFile {
@@ -32,7 +34,10 @@ export interface ToolCall {
   name: string
   arguments: string
   result?: string
+  execution_status?: ToolExecutionStatus
 }
+
+export type ToolExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface StreamData {
   type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'end' | 'error' | 'status' | 'plan' | 'kuncode_preview' | 'plan_preview' | 'user_input_request' | 'user_input_required' | 'context_update' | 'auto_continue' | 'interrupted' | 'step_complete'

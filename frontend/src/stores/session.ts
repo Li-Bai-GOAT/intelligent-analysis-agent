@@ -2,34 +2,34 @@ import { create } from 'zustand'
 import { Api } from '../api/client'
 import type { Session, Message, StreamData } from '../types'
 import { useUiStore } from './ui'
+import { extractMessageContent, finalizeTurnMessages, mergeThinking, projectHistoryMessages } from './conversationProjection'
 
-function extractContent(content: unknown): string {
-  if (content === null || content === undefined) return ''
-  if (typeof content === 'string') return content
-  if (typeof content === 'number') return String(content)
-  if (Array.isArray(content)) {
-    return content
-      .map((item: unknown) => {
-        if (typeof item === 'string') return item
-        if (item && typeof item === 'object') {
-          const obj = item as Record<string, unknown>
-          if ('text' in obj && typeof obj.text === 'string') return obj.text
-          if ('content' in obj && typeof obj.content === 'string') return obj.content
-        }
-        return ''
-      })
-      .filter(Boolean)
-      .join('')
+function updateTurn(
+  messages: Message[],
+  turnId: string | null,
+  updater: (message: Message) => Message,
+): Message[] {
+  const next = [...messages]
+  let index = turnId ? next.findIndex((message) => message.role === 'assistant' && message.turnId === turnId) : -1
+  if (index < 0) {
+    for (let i = next.length - 1; i >= 0; i--) {
+      if (next[i].role === 'user') break
+      if (next[i].role === 'assistant') {
+        index = i
+        break
+      }
+    }
   }
-  if (typeof content === 'object') {
-    const obj = content as Record<string, unknown>
-    if ('text' in obj) return String(obj.text)
-    if ('content' in obj) return String(obj.content)
+  if (index < 0) {
+    next.push(updater({ role: 'assistant', content: '', turnId: turnId || undefined, status: 'running' }))
+  } else {
+    next[index] = updater(next[index])
   }
-  return String(content)
+  return next
 }
 
 interface StreamState {
+  activeTurnId: string | null
   thinkingBlock: string | null
   assistantEl: string | null
   currentToolId: string | null
@@ -91,6 +91,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   contextInfo: null,
   isStreaming: false,
   streamState: {
+    activeTurnId: null,
     thinkingBlock: null,
     assistantEl: null,
     currentToolId: null,
@@ -123,6 +124,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       isStreaming: false,
       pendingPreview: null,
       streamState: {
+        activeTurnId: null,
         thinkingBlock: null,
         assistantEl: null,
         currentToolId: null,
@@ -139,97 +141,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (get()._selectVersion !== version) return
 
       const rawMessages = (detail.messages || []) as unknown as Record<string, unknown>[]
-
-      // 辅助函数：从 content 数组中提取 data 字段
-      const extractContentData = (content: unknown): Record<string, unknown> | null => {
-        if (Array.isArray(content) && content.length > 0) {
-          const first = content[0] as Record<string, unknown>
-          if (first && first.data) return first.data as Record<string, unknown>
-        }
-        return null
-      }
-
-      // 第一遍：收集所有 plugin_call_output 结果
-      const toolResults = new Map<string, string>()
-      for (const m of rawMessages) {
-        const msgType = String(m.type || m.msg_type || 'message')
-        if (msgType === 'plugin_call_output' || msgType === 'plugin_call_result') {
-          const data = extractContentData(m.content)
-          const callId = data ? String(data.call_id || '') : String(m.call_id || '')
-          const output = data ? String(data.output || '') : extractContent(m.content)
-          if (callId && output) {
-            toolResults.set(callId, output)
-          }
-        }
-      }
-
-      // 第二遍：构建消息列表
-      const messages: Message[] = []
-      const seenToolIds = new Set<string>()
-
-      for (const m of rawMessages) {
-        const role = String(m.role || 'user')
-        const msgType = String(m.type || m.msg_type || 'message')
-        const content = extractContent(m.content)
-
-        // 跳过 plugin_call_output（已合并到 tool_calls 中）
-        if (msgType === 'plugin_call_output' || msgType === 'plugin_call_result') continue
-
-        // plugin_call 消息 -> 提取 tool_calls
-        if (msgType === 'plugin_call') {
-          // 后端结构: content = [{ data: { name, call_id, arguments } }]
-          const data = extractContentData(m.content)
-          const toolId = data ? String(data.call_id || '') : String(m.call_id || '')
-          const toolName = data ? String(data.name || '') : String(m.tool_name || m.name || '')
-          const rawToolInput = data ? (data.arguments ?? data.code ?? '') : (m.tool_input ?? content ?? '')
-          const toolInput = typeof rawToolInput === 'object' && rawToolInput !== null
-            ? JSON.stringify(rawToolInput)
-            : String(rawToolInput)
-          if (toolId && !seenToolIds.has(toolId)) {
-            seenToolIds.add(toolId)
-            // 找到上一条 assistant 消息，添加 tool_calls
-            const lastMsg = messages[messages.length - 1]
-            if (lastMsg && lastMsg.role === 'assistant') {
-              if (!Array.isArray(lastMsg.tool_calls)) lastMsg.tool_calls = []
-              lastMsg.tool_calls.push({
-                id: toolId,
-                name: toolName,
-                arguments: toolInput,
-                result: toolResults.get(toolId) || '',
-              })
-            } else {
-              // 没有前置 assistant 消息，创建一个空的
-              messages.push({
-                role: 'assistant',
-                content: '',
-                tool_calls: [{
-                  id: toolId,
-                  name: toolName,
-                  arguments: toolInput,
-                  result: toolResults.get(toolId) || '',
-                }],
-              })
-            }
-          }
-          continue
-        }
-
-        // 跳过空消息
-        if (!content && msgType !== 'reasoning') continue
-
-        const msg: Message = {
-          role: role as Message['role'],
-          content,
-        }
-
-        // reasoning 消息作为 thinking 块
-        if (msgType === 'reasoning' && role === 'assistant') {
-          msg.thinking = content
-          msg.content = ''
-        }
-
-        messages.push(msg)
-      }
+      let messages = projectHistoryMessages(rawMessages)
 
       set({ messages, contextInfo: detail.context_info || null })
 
@@ -238,16 +150,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (get()._selectVersion !== version) return
 
       if (taskInfo.has_active_task && taskInfo.task_id) {
-        set({ isStreaming: true })
+        const activeTaskId = taskInfo.task_id
+        const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant')
+        if (lastAssistant) {
+          messages = messages.map((message) => message === lastAssistant
+            ? { ...message, turnId: activeTaskId, status: 'running' }
+            : message)
+        } else {
+          messages = [...messages, { role: 'assistant', content: '', turnId: activeTaskId, status: 'running' }]
+        }
+        set((current) => ({
+          messages,
+          isStreaming: true,
+          streamState: { ...current.streamState, activeTurnId: activeTaskId },
+        }))
         const eventSource = Api.streamTask(
-          taskInfo.task_id,
+          activeTaskId,
           (data) => get().handleStreamData(data as unknown as StreamData),
-          () => {
+          (data) => {
+            if (data.type === 'error' && get().isStreaming) {
+              get().handleStreamData(data as unknown as StreamData)
+            }
             get().disconnectStream()
-            set({ isStreaming: false })
           },
         )
         set({ currentEventSource: eventSource })
+      } else {
+        messages = finalizeTurnMessages(messages, null, 'failed', '[ERROR] 执行记录不完整，任务已结束。')
+        set({ messages })
       }
     } catch (err) {
       console.error('Load session error:', err)
@@ -314,15 +244,32 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       set({ isStreaming: true })
       const result = await Api.submitTask(state.currentSession, content, fileIds, executionMode)
       set((current) => ({
-        messages: [...current.messages, userMsg],
+        messages: [
+          ...current.messages,
+          userMsg,
+          { role: 'assistant', content: '', turnId: result.task_id, status: 'running' },
+        ],
         pendingFiles: [],
         uploadedFileIds: fileIds,
+        streamState: {
+          activeTurnId: result.task_id,
+          thinkingBlock: null,
+          assistantEl: null,
+          currentToolId: null,
+          currentToolName: null,
+          seenToolIds: new Set(),
+          terminalCommands: new Set(),
+        },
       }))
       console.log('[SessionStore] task submitted:', result.task_id)
       const eventSource = Api.streamTask(
         result.task_id,
         (data) => get().handleStreamData(data as unknown as StreamData),
-        () => set({ isStreaming: false }),
+        (data) => {
+          if (data.type === 'error' && get().isStreaming) {
+            get().handleStreamData(data as unknown as StreamData)
+          }
+        },
       )
       set({ currentEventSource: eventSource })
       return true
@@ -379,20 +326,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   handleStreamData: (data: StreamData) => {
     console.log('[StreamData]', data.type, (data.content || '').substring(0, 50))
-    const state = get()
 
     switch (data.type) {
       case 'text': {
         const content = (data.content || '').replace(/<｜DSML｜[\s\S]*$/g, '').trim()
         if (!content) break
-        const msgs = [...state.messages]
-        const last = msgs[msgs.length - 1]
-        if (last && last.role === 'assistant') {
-          msgs[msgs.length - 1] = { ...last, content }
-        } else {
-          msgs.push({ role: 'assistant', content })
-        }
-        set({ messages: msgs })
+        set((current) => ({
+          messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => ({
+            ...message,
+            content,
+            status: 'running',
+          })),
+        }))
         if (data.generated_files && data.generated_files.length > 0) {
           useUiStore.getState().setRightTab('files')
         }
@@ -401,81 +346,62 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       case 'thinking': {
         const thinkingContent = (data.content || '').replace(/<｜end▁of▁thinking｜>/g, '').trim()
         if (!thinkingContent) break
-        const msgs = [...state.messages]
-        const last = msgs[msgs.length - 1]
-        if (last && last.role === 'assistant') {
-          msgs[msgs.length - 1] = { ...last, thinking: thinkingContent }
-        }
-        set({ messages: msgs })
+        set((current) => ({
+          messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => ({
+            ...message,
+            thinking: mergeThinking(message.thinking, thinkingContent),
+            status: 'running',
+          })),
+        }))
         break
       }
       case 'tool_call': {
-        // 后端字段: content=tool_name, tool_id, input=tool_arguments
         const toolId = data.tool_id || ''
-        const seen = new Set(state.streamState.seenToolIds)
         const toolName = data.content || data.tool_name || ''
         const rawInput = data.input ?? data.tool_arguments
-        // 如果 input 是对象，序列化为 JSON 字符串；否则转为字符串
         const toolInput = typeof rawInput === 'object' && rawInput !== null
           ? JSON.stringify(rawInput)
           : String(rawInput || '')
-
-        if (toolId && seen.has(toolId)) {
-          const msgs = [...state.messages]
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const msg = msgs[i]
-            if (!msg.tool_calls?.some((tc) => tc.id === toolId)) continue
-            const toolCalls = msg.tool_calls.map((tc) =>
-              tc.id === toolId ? { ...tc, name: toolName || tc.name, arguments: toolInput || tc.arguments } : tc,
-            )
-            msgs[i] = { ...msg, tool_calls: toolCalls }
-            set({ messages: msgs })
-            break
+        set((current) => {
+          const seen = new Set(current.streamState.seenToolIds)
+          seen.add(toolId)
+          return {
+            messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => {
+              const toolCalls = [...(message.tool_calls || [])]
+              const index = toolCalls.findIndex((tool) => tool.id === toolId)
+              const nextTool = {
+                id: toolId,
+                name: toolName,
+                arguments: toolInput,
+                execution_status: 'running' as const,
+              }
+              if (index >= 0) toolCalls[index] = { ...toolCalls[index], ...nextTool }
+              else toolCalls.push(nextTool)
+              return { ...message, status: 'running', tool_calls: toolCalls }
+            }),
+            streamState: {
+              ...current.streamState,
+              seenToolIds: seen,
+              currentToolId: toolId,
+              currentToolName: toolName,
+            },
           }
-          break
-        }
-        seen.add(toolId)
-
-        const msgs = [...state.messages]
-        const last = msgs[msgs.length - 1]
-        if (last && last.role === 'assistant') {
-          const toolCalls = [...(last.tool_calls || [])]
-          toolCalls.push({
-            id: toolId,
-            name: toolName,
-            arguments: toolInput,
-          })
-          msgs[msgs.length - 1] = { ...last, tool_calls: toolCalls }
-        } else {
-          // 如果还没有 assistant 消息，创建一个
-          msgs.push({
-            role: 'assistant',
-            content: '',
-            tool_calls: [{ id: toolId, name: toolName, arguments: toolInput }],
-          })
-        }
-        set({
-          messages: msgs,
-          streamState: { ...state.streamState, seenToolIds: seen, currentToolId: toolId, currentToolName: toolName },
         })
         break
       }
       case 'tool_result': {
-        // 后端字段: content=result_text, tool_id (匹配 tool_call 的 id)
-        const msgs = [...state.messages]
-        const resultText = extractContent(data.content ?? data.result ?? '')
-        let updated = false
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          const msg = msgs[i]
-          if (!msg.tool_calls?.some((tc) => tc.id === data.tool_id)) continue
-          const toolCalls = msg.tool_calls.map((tc) =>
-            tc.id === data.tool_id ? { ...tc, result: resultText } : tc,
-          )
-          msgs[i] = { ...msg, tool_calls: toolCalls }
-          updated = true
-          break
-        }
-        if (updated) set({ messages: msgs })
+        const resultText = extractMessageContent(data.content ?? data.result ?? '')
+        const executionStatus = data.execution_status || (
+          resultText.toLowerCase().includes('[error]') ? 'failed' : 'completed'
+        )
+        set((current) => ({
+          messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => ({
+            ...message,
+            tool_calls: message.tool_calls?.map((tool) => tool.id === data.tool_id
+              ? { ...tool, result: resultText, execution_status: executionStatus }
+              : tool),
+          })),
+        }))
         break
       }
       case 'context_update': {
@@ -498,15 +424,50 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       case 'status':
         break
       case 'end':
-        set({ isStreaming: false })
+        set((current) => ({
+          isStreaming: false,
+          currentEventSource: null,
+          messages: finalizeTurnMessages(
+            current.messages,
+            current.streamState.activeTurnId,
+            'completed',
+            '[ERROR] 工具调用未返回完整结果。',
+          ),
+          streamState: { ...current.streamState, activeTurnId: null },
+        }))
         break
       case 'error':
-        set({ isStreaming: false })
-        if (data.content) {
-          const msgs = [...state.messages]
-          msgs.push({ role: 'system', content: data.content })
-          set({ messages: msgs })
-        }
+        set((current) => {
+          const content = extractMessageContent(data.content || '执行失败')
+          const msgs = finalizeTurnMessages(
+            current.messages,
+            current.streamState.activeTurnId,
+            'failed',
+            `[ERROR] ${content}`,
+          )
+          return {
+            isStreaming: false,
+            currentEventSource: null,
+            messages: msgs,
+            streamState: { ...current.streamState, activeTurnId: null },
+          }
+        })
+        break
+      case 'interrupted':
+        set((current) => {
+          const content = extractMessageContent(data.content || '用户中断了执行')
+          return {
+            isStreaming: false,
+            currentEventSource: null,
+            messages: finalizeTurnMessages(
+              current.messages,
+              current.streamState.activeTurnId,
+              'cancelled',
+              `[CANCELLED] ${content}`,
+            ),
+            streamState: { ...current.streamState, activeTurnId: null },
+          }
+        })
         break
     }
   },

@@ -269,7 +269,7 @@ def _normalize_kuncode_agent(agent: Optional[str]) -> Optional[str]:
     description="Data Analysis Sandbox with KunCode AI (pandas, numpy, matplotlib, seaborn, scikit-learn)",
     environment={
         # KunCode 模型配置
-        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.5-pro"),
+        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "deepseek/deepseek-v4-flash"),
         # MiniMax
         "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
         # DeepSeek
@@ -495,7 +495,7 @@ class DataAnalysisSandbox(Sandbox):
     description="Data Analysis Sandbox with KunCode AI (Async)",
     environment={
         # KunCode 模型配置
-        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.5-pro"),
+        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "deepseek/deepseek-v4-flash"),
         # MiniMax
         "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
         # DeepSeek

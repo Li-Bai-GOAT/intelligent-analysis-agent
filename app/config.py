@@ -79,7 +79,8 @@ class Settings(BaseSettings):
     # DeepSeek 配置
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
-    DEEPSEEK_MODEL_NAME: str = "deepseek-reasoner"
+    # 使用当前 DeepSeek V4 的非思考模式；其 OpenAI 兼容接口支持工具调用。
+    DEEPSEEK_MODEL_NAME: str = "deepseek-v4-flash"
     
     # MiniMax 配置 (Anthropic API 兼容)
     MINIMAX_API_KEY: str = ""
