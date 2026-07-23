@@ -161,6 +161,66 @@ def _build_terminal_tool_results(
         if tool_id
     ]
 
+
+def _build_streamed_tool_result(tool_id: str, output: Any) -> dict:
+    """Normalize AgentScope tool outputs into the terminal SSE contract."""
+    if isinstance(output, str):
+        result_text = output
+    elif output is None:
+        result_text = ""
+    else:
+        result_text = json.dumps(output, ensure_ascii=False)
+
+    is_error = any(
+        marker in result_text.lower()
+        for marker in ("[error]", "traceback", "exception", "failed")
+    )
+    return {
+        "type": "tool_result",
+        "content": result_text,
+        "tool_id": tool_id,
+        "phase": "failed" if is_error else "completed",
+        "execution_status": "failed" if is_error else "completed",
+    }
+
+
+def _extract_persisted_tool_results(
+    messages: list[Any],
+    pending_tool_calls: Dict[str, str],
+) -> list[dict]:
+    """Recover terminal results that AgentScope persisted without streaming."""
+    recovered: list[dict] = []
+    recovered_ids: set[str] = set()
+
+    for record in messages:
+        message = record if isinstance(record, dict) else getattr(record, "message", {})
+        if not isinstance(message, dict):
+            continue
+        msg_type = message.get("type") or message.get("msg_type")
+        if msg_type not in ("plugin_call_output", "plugin_call_result"):
+            continue
+
+        for item in message.get("content", []):
+            if not isinstance(item, dict) or item.get("type") != "data":
+                continue
+            data = item.get("data", {})
+            if not isinstance(data, dict):
+                continue
+            tool_id = str(data.get("call_id") or "")
+            if (
+                not tool_id
+                or tool_id not in pending_tool_calls
+                or tool_id in recovered_ids
+            ):
+                continue
+            recovered.append(
+                _build_streamed_tool_result(tool_id, data.get("output"))
+            )
+            recovered_ids.add(tool_id)
+
+    return recovered
+
+
 import redis.asyncio as aioredis
 
 from agentscope.agent import ReActAgent
@@ -1342,19 +1402,25 @@ class AgentService:
                                         text_parts = [o.get("text", "") for o in output if isinstance(o, dict) and o.get("type") == "text"]
                                         tool_id = item.get("tool_use_id", "")
                                         result_text = "".join(text_parts)
-                                        is_error = any(
-                                            marker in result_text.lower()
-                                            for marker in ("[error]", "traceback", "exception", "failed")
-                                        )
                                         # 移除已完成的 tool_call
                                         pending_tool_calls.pop(tool_id, None)
-                                        yield {
-                                            "type": "tool_result",
-                                            "content": result_text,
-                                            "tool_id": tool_id,
-                                            "phase": "failed" if is_error else "completed",
-                                            "execution_status": "failed" if is_error else "completed",
-                                        }
+                                        yield _build_streamed_tool_result(tool_id, result_text)
+                                    elif block_type == "data":
+                                        # AgentScope stores plugin_call_output blocks in this
+                                        # shape. A matching block is the real terminal result.
+                                        data = item.get("data", {})
+                                        tool_id = data.get("call_id", "") if isinstance(data, dict) else ""
+                                        if tool_id and tool_id in pending_tool_calls:
+                                            pending_tool_calls.pop(tool_id, None)
+                                            yield _build_streamed_tool_result(
+                                                tool_id,
+                                                data.get("output"),
+                                            )
+                                        else:
+                                            yield {
+                                                "type": block_type,
+                                                "content": filter_model_tokens(str(item)),
+                                            }
                                     else:
                                         yield {"type": block_type, "content": filter_model_tokens(str(item))}
                         else:
@@ -1401,7 +1467,28 @@ class AgentService:
                         raise exc
             
             # 整个对话完成后保存状态
-            # Close omitted tool results without claiming an unobserved success.
+            # AgentScope may persist plugin_call_output without exposing that
+            # message through the live stream. Recover those paired results
+            # before treating any genuinely unresolved call as failed.
+            if pending_tool_calls:
+                try:
+                    db_session = await SessionRepository.get(user_id, session_id)
+                    if db_session:
+                        stored_messages = await SessionRepository.get_messages(db_session)
+                        for terminal_event in _extract_persisted_tool_results(
+                            stored_messages,
+                            pending_tool_calls,
+                        ):
+                            pending_tool_calls.pop(terminal_event["tool_id"], None)
+                            yield terminal_event
+                except Exception as recovery_error:
+                    logger.warning(
+                        "Failed to recover persisted tool results: session=%s error=%s",
+                        session_id,
+                        recovery_error,
+                    )
+
+            # Close truly omitted tool results without claiming success.
             for terminal_event in _build_terminal_tool_results(pending_tool_calls):
                 yield terminal_event
             pending_tool_calls.clear()

@@ -12,8 +12,10 @@ from app.api.files import _is_within_workspace
 from app.repositories.session_repo import SessionRepository
 from app.services.agent_service import (
     AgentService,
+    _build_streamed_tool_result,
     _build_terminal_tool_results,
     _build_kuncode_completion_message,
+    _extract_persisted_tool_results,
     _extract_workspace_files,
 )
 from app.services.sandbox_injection import SandboxInjectionService
@@ -120,6 +122,44 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         cancelled = _build_terminal_tool_results({"call-1": "run_kuncode"}, status="cancelled")
         self.assertEqual(cancelled[0]["execution_status"], "cancelled")
+
+    async def test_streamed_agentscope_data_output_is_a_completed_tool_result(self):
+        event = _build_streamed_tool_result(
+            "call-1",
+            [{"type": "text", "text": "KunCode analysis completed"}],
+        )
+
+        self.assertEqual(event["type"], "tool_result")
+        self.assertEqual(event["tool_id"], "call-1")
+        self.assertEqual(event["execution_status"], "completed")
+        self.assertIn("KunCode analysis completed", event["content"])
+
+        failed = _build_streamed_tool_result("call-2", "[ERROR] sandbox failed")
+        self.assertEqual(failed["execution_status"], "failed")
+
+    async def test_persisted_tool_output_recovers_an_unstreamed_call(self):
+        messages = [
+            SimpleNamespace(message={
+                "type": "plugin_call_output",
+                "content": [{
+                    "type": "data",
+                    "data": {
+                        "call_id": "call-1",
+                        "name": "run_kuncode",
+                        "output": '[{"type":"text","text":"analysis complete"}]',
+                    },
+                }],
+            }),
+        ]
+
+        events = _extract_persisted_tool_results(
+            messages,
+            {"call-1": "run_kuncode", "call-2": "run_kuncode"},
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["tool_id"], "call-1")
+        self.assertEqual(events[0]["execution_status"], "completed")
 
     async def test_workspace_path_check_rejects_prefix_collision(self):
         self.assertTrue(_is_within_workspace(r"C:\data\workspace\report.txt", r"C:\data\workspace"))
