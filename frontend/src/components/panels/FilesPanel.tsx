@@ -1,15 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import * as XLSX from 'xlsx'
 import mammoth from 'mammoth'
-import * as pdfjsLib from 'pdfjs-dist'
-import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import JSZip from 'jszip'
 import { Api } from '../../api/client'
 import { useSessionStore } from '../../stores/session'
-import { Folder, File, FileText, FileCode, FileSpreadsheet, Download, RefreshCw, ChevronRight, ArrowLeft } from 'lucide-react'
-
-// pdf.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker
+import { Folder, File, FileText, FileCode, FileSpreadsheet, Download, RefreshCw, ChevronRight, ArrowLeft, ExternalLink } from 'lucide-react'
 
 interface FileItem {
   name: string
@@ -19,42 +14,15 @@ interface FileItem {
   size?: number
 }
 
-// PDF 渲染组件
-function PdfViewer({ data }: { data: Uint8Array }) {
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!containerRef.current || !data) return
-    const container = containerRef.current
-    let cancelled = false
-
-    const render = async () => {
-      container.innerHTML = ''
-      const pdf = await pdfjsLib.getDocument({ data }).promise
-      for (let i = 1; i <= pdf.numPages; i++) {
-        if (cancelled) break
-        const page = await pdf.getPage(i)
-        const scale = 1.5
-        const viewport = page.getViewport({ scale })
-        const canvas = document.createElement('canvas')
-        canvas.width = viewport.width
-        canvas.height = viewport.height
-        canvas.style.width = '100%'
-        canvas.style.height = 'auto'
-        canvas.style.display = 'block'
-        canvas.style.marginBottom = '8px'
-        const ctx = canvas.getContext('2d')!
-        await page.render({ canvasContext: ctx, viewport }).promise
-        container.appendChild(canvas)
-      }
-    }
-    render().catch(() => {
-      if (!cancelled) container.innerHTML = '<p style="color:#a6adc8;padding:16px">PDF 加载失败</p>'
-    })
-    return () => { cancelled = true }
-  }, [data])
-
-  return <div ref={containerRef} className="flex-1 overflow-auto p-2" style={{ background: '#1e1e2e' }} />
+// PDF 预览组件
+function PdfViewer({ url, title }: { url: string; title: string }) {
+  return (
+    <iframe
+      src={url}
+      className="flex-1 w-full border-0 bg-white"
+      title={`${title} preview`}
+    />
+  )
 }
 
 // PPT 幻灯片预览组件
@@ -76,8 +44,9 @@ export function FilesPanel() {
   const currentSession = useSessionStore((s) => s.currentSession)
   const [files, setFiles] = useState<FileItem[]>([])
   const [currentPath, setCurrentPath] = useState('')
-  const [fileContent, setFileContent] = useState<{ name: string; content: string; fullPath: string; isImage?: boolean; isHtml?: boolean; isExcel?: boolean; isWord?: boolean; isPdf?: boolean; isPptx?: boolean; pdfData?: Uint8Array; pptxSlides?: string[]; excelData?: { headers: string[]; rows: (string | number)[][] } } | null>(null)
+  const [fileContent, setFileContent] = useState<{ name: string; content: string; fullPath: string; isImage?: boolean; isHtml?: boolean; isExcel?: boolean; isWord?: boolean; isPdf?: boolean; isPptx?: boolean; pdfUrl?: string; pptxSlides?: string[]; excelData?: { headers: string[]; rows: (string | number)[][] } } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
 
   const saveBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob)
@@ -98,18 +67,35 @@ export function FilesPanel() {
     saveBlob(await Api.downloadSandboxZip(currentSession), `workspace_${currentSession.slice(0, 8)}.zip`)
   }
 
+  const readBinaryFile = async (path: string) => {
+    if (!currentSession) throw new Error('no session')
+    const blob = await Api.downloadSandboxFile(currentSession, path)
+    return new Uint8Array(await blob.arrayBuffer())
+  }
+
+  const openHtmlInNewPage = (html: string) => {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const opened = window.open(url, '_blank', 'noopener,noreferrer')
+    window.setTimeout(() => URL.revokeObjectURL(url), opened ? 60_000 : 0)
+  }
+
   const loadFiles = useCallback(async (path = '') => {
     if (!currentSession) return
     setLoading(true)
     try {
       const data = await Api.listSandboxWorkspace(currentSession, path)
       // 后端返回 type: "file" | "directory"，前端使用 is_dir: boolean
-      const mapped = Array.isArray(data) ? data.map(item => ({
-        name: item.name,
-        path: item.path,
-        is_dir: item.is_dir ?? item.type === 'directory',
-        size: item.size,
-      })) : []
+      const mapped = Array.isArray(data)
+        ? data
+            .filter(item => !item.name.toLowerCase().endsWith('.py'))
+            .map(item => ({
+              name: item.name,
+              path: item.path,
+              is_dir: item.is_dir ?? item.type === 'directory',
+              size: item.size,
+            }))
+        : []
       setFiles(mapped)
       setCurrentPath(path)
       setFileContent(null)
@@ -129,11 +115,11 @@ export function FilesPanel() {
   }, [loadFiles])
 
   useEffect(() => {
-    const objectUrl = fileContent?.isImage ? fileContent.content : null
+    const objectUrl = fileContent?.isImage || fileContent?.isPdf ? fileContent.content : null
     return () => {
       if (objectUrl?.startsWith('blob:')) URL.revokeObjectURL(objectUrl)
     }
-  }, [fileContent?.content, fileContent?.isImage])
+  }, [fileContent?.content, fileContent?.isImage, fileContent?.isPdf])
 
   const viewFile = async (fullPath: string, name: string) => {
     if (!currentSession) return
@@ -145,14 +131,88 @@ export function FilesPanel() {
     const isPptx = ext === 'pptx' || ext === 'ppt'
     // 后端 _scan_directory 返回的 path 已经是相对于 workspace 根目录的完整路径
     try {
+      setPreviewLoading(true)
+
+      if (isPdf) {
+        const blob = await Api.downloadSandboxFile(currentSession, fullPath)
+        const pdfBlob = blob.type === 'application/pdf'
+          ? blob
+          : new Blob([blob], { type: 'application/pdf' })
+        setFileContent({ name, content: URL.createObjectURL(pdfBlob), fullPath, isPdf: true })
+        return
+      }
+
+      if (ext === 'doc') {
+        setFileContent({ name, content: '当前浏览器预览主要支持 .docx，.doc 建议下载查看', fullPath, isWord: true })
+        return
+      }
+
+      if (ext === 'ppt') {
+        setFileContent({ name, content: '当前浏览器预览主要支持 .pptx，.ppt 建议下载查看', fullPath, isPptx: true })
+        return
+      }
+
+      if (ext === 'xlsx' || ext === 'xls') {
+        try {
+          const bytes = await readBinaryFile(fullPath)
+          const workbook = XLSX.read(bytes, { type: 'array' })
+          const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
+          const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as (string | number)[][]
+          if (jsonData.length > 0) {
+            const headers = (jsonData[0] || []).map(String)
+            const rows = jsonData.slice(1).filter(row => row && row.length > 0)
+            setFileContent({ name, content: '', fullPath, isExcel: true, excelData: { headers, rows } })
+          } else {
+            setFileContent({ name, content: 'Excel 文件为空', fullPath })
+          }
+        } catch {
+          setFileContent({ name, content: 'Excel 预览失败，请下载后查看', fullPath })
+        }
+        return
+      }
+
+      if (isWord) {
+        try {
+          const bytes = await readBinaryFile(fullPath)
+          const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer })
+          setFileContent({ name, content: result.value || '<p>Word 文件为空</p>', fullPath, isWord: true })
+        } catch {
+          setFileContent({ name, content: 'Word 预览失败，请下载后查看', fullPath, isWord: true })
+        }
+        return
+      }
+
+      if (isPptx) {
+        try {
+          const bytes = await readBinaryFile(fullPath)
+          const zip = await JSZip.loadAsync(bytes.buffer)
+          const slides: string[] = []
+          const slideFiles = Object.keys(zip.files)
+            .filter(k => /^ppt\/slides\/slide\d+\.xml$/.test(k))
+            .sort()
+          for (const slideFile of slideFiles) {
+            const xml = await zip.file(slideFile)!.async('text')
+            const texts: string[] = []
+            const regex = /<a:t>([^<]*)<\/a:t>/g
+            let m
+            while ((m = regex.exec(xml)) !== null) {
+              if (m[1].trim()) texts.push(m[1].trim())
+            }
+            slides.push(texts.join('\n'))
+          }
+          setFileContent({ name, content: '', fullPath, isPptx: true, pptxSlides: slides })
+        } catch {
+          setFileContent({ name, content: 'PPT 预览失败，请下载后查看', fullPath, isPptx: true })
+        }
+        return
+      }
+
       const data = await Api.getSandboxFileContent(currentSession, fullPath)
-      // 处理二进制文件（图片等）
       if (data.binary) {
         if (data.image) {
           const blob = await Api.downloadSandboxFile(currentSession, fullPath)
           setFileContent({ name, content: URL.createObjectURL(blob), fullPath, isImage: true })
         } else if (isExcel) {
-          // Excel 文件：解析并显示为表格
           try {
             const base64 = data.content || ''
             const binary = atob(base64)
@@ -169,10 +229,9 @@ export function FilesPanel() {
               setFileContent({ name, content: 'Excel 文件为空', fullPath })
             }
           } catch {
-            setFileContent({ name, content: `[二进制文件: ${name}]`, fullPath })
+            setFileContent({ name, content: 'Excel 预览失败，请下载后查看', fullPath })
           }
         } else if (isWord) {
-          // Word 文件：解析并显示为 HTML
           try {
             const base64 = data.content || ''
             const binary = atob(base64)
@@ -181,21 +240,9 @@ export function FilesPanel() {
             const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer })
             setFileContent({ name, content: result.value || '<p>Word 文件为空</p>', fullPath, isWord: true })
           } catch {
-            setFileContent({ name, content: `[二进制文件: ${name}]`, fullPath })
-          }
-        } else if (isPdf) {
-          // PDF 文件：保存二进制数据，由 PdfViewer 组件渲染
-          try {
-            const base64 = data.content || ''
-            const binary = atob(base64)
-            const bytes = new Uint8Array(binary.length)
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-            setFileContent({ name, content: '', fullPath, isPdf: true, pdfData: bytes })
-          } catch {
-            setFileContent({ name, content: `[二进制文件: ${name}]`, fullPath })
+            setFileContent({ name, content: 'Word 预览失败，请下载后查看', fullPath, isWord: true })
           }
         } else if (isPptx) {
-          // PPT 文件：提取幻灯片文本内容
           try {
             const base64 = data.content || ''
             const binary = atob(base64)
@@ -203,13 +250,11 @@ export function FilesPanel() {
             for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
             const zip = await JSZip.loadAsync(bytes.buffer)
             const slides: string[] = []
-            // PPTX 内部结构：ppt/slides/slide1.xml, slide2.xml, ...
             const slideFiles = Object.keys(zip.files)
               .filter(k => /^ppt\/slides\/slide\d+\.xml$/.test(k))
               .sort()
             for (const slideFile of slideFiles) {
               const xml = await zip.file(slideFile)!.async('text')
-              // 从 XML 中提取文本节点内容
               const texts: string[] = []
               const regex = /<a:t>([^<]*)<\/a:t>/g
               let m
@@ -220,16 +265,14 @@ export function FilesPanel() {
             }
             setFileContent({ name, content: '', fullPath, isPptx: true, pptxSlides: slides })
           } catch {
-            setFileContent({ name, content: `[二进制文件: ${name}]`, fullPath })
+            setFileContent({ name, content: 'PPT 预览失败，请下载后查看', fullPath, isPptx: true })
           }
         } else {
           setFileContent({ name, content: `[二进制文件: ${name}]`, fullPath })
         }
       } else if (isHtml) {
-        // HTML 文件：标记为 HTML，内容用于 iframe 渲染
         setFileContent({ name, content: data.content ?? '', fullPath, isHtml: true })
       } else if (isExcel) {
-        // CSV 等文本格式的 Excel 文件
         try {
           const workbook = XLSX.read(data.content || '', { type: 'string' })
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
@@ -249,6 +292,8 @@ export function FilesPanel() {
       }
     } catch {
       setFileContent({ name, content: '无法读取文件内容', fullPath })
+    } finally {
+      setPreviewLoading(false)
     }
   }
 
@@ -281,6 +326,16 @@ export function FilesPanel() {
           </button>
           <span className="text-xs font-medium text-text-primary truncate">{fileContent.name}</span>
           <div className="flex-1" />
+          {fileContent.isHtml && (
+            <button
+              type="button"
+              onClick={() => openHtmlInNewPage(fileContent.content)}
+              className="text-text-muted hover:text-accent transition-colors"
+              title="新页面显示"
+            >
+              <ExternalLink size={14} />
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void downloadFile(fileContent.fullPath, fileContent.name)}
@@ -323,17 +378,25 @@ export function FilesPanel() {
               </tbody>
             </table>
           </div>
-        ) : fileContent.isWord ? (
+        ) : fileContent.isWord && fileContent.content.trim().startsWith('<') ? (
           <iframe
             srcDoc={fileContent.content}
             className="flex-1 w-full border-0 bg-white"
             title={`${fileContent.name} preview`}
             sandbox=""
           />
-        ) : fileContent.isPdf && fileContent.pdfData ? (
-          <PdfViewer data={fileContent.pdfData} />
+        ) : fileContent.isWord ? (
+          <div className="flex-1 flex items-center justify-center p-4 text-sm" style={{ background: '#1e1e2e', color: '#a6adc8' }}>
+            {fileContent.content}
+          </div>
+        ) : fileContent.isPdf ? (
+          <PdfViewer url={fileContent.content} title={fileContent.name} />
         ) : fileContent.isPptx && fileContent.pptxSlides ? (
           <PptxViewer slides={fileContent.pptxSlides} />
+        ) : fileContent.isPptx ? (
+          <div className="flex-1 flex items-center justify-center p-4 text-sm" style={{ background: '#1e1e2e', color: '#a6adc8' }}>
+            {fileContent.content}
+          </div>
         ) : fileContent.isHtml ? (
           <iframe
             srcDoc={fileContent.content}
@@ -373,6 +436,7 @@ export function FilesPanel() {
           ))}
         </div>
         <div className="flex items-center gap-1">
+          {(previewLoading || loading) && <span className="text-[10px] text-text-muted mr-1">加载中...</span>}
           <button
             type="button"
             onClick={() => void downloadZip()}
