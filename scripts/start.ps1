@@ -18,6 +18,15 @@ $OllamaModels = Join-Path $OllamaRuntime 'models'
 
 New-Item -ItemType Directory -Path $PidDirectory, $LogDirectory -Force | Out-Null
 
+# Some Windows hosts inherit both Path and PATH as separate entries. PowerShell
+# treats them as duplicate dictionary keys when Start-Process builds a child
+# environment, so normalize them once before starting managed services.
+$processPath = [System.Environment]::GetEnvironmentVariable('Path', 'Process')
+if ($processPath) {
+    [System.Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+    [System.Environment]::SetEnvironmentVariable('Path', $processPath, 'Process')
+}
+
 function Test-TcpPort([int]$Port) {
     try {
         return Test-NetConnection -ComputerName '127.0.0.1' -Port $Port -InformationLevel Quiet -WarningAction SilentlyContinue

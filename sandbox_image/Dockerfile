@@ -11,7 +11,7 @@ LABEL description="Data Analysis Sandbox with KunCode AI"
 # ============= 环境变量配置 =============
 # KunCode 所需的 LLM API 环境变量（运行时通过 docker run -e 传入）
 ENV PATH="/root/.local/bin:${PATH}"
-ENV KUNCODE_MODEL=""
+ENV KUNCODE_MODEL="deepseek/deepseek-v4-flash"
 ENV DEEPSEEK_API_KEY=""
 ENV DEEPSEEK_BASE_URL=""
 ENV MIMO_API_KEY=""

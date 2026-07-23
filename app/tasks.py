@@ -219,9 +219,6 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
             final_result = {"type": "end", "content": "任务结束", "session_id": session_id}
             await agent_service.write_task_stream(task_id, final_result, session_id)
 
-        if session_id:
-            await agent_service.clear_session_task(session_id)
-
         return {
             "success": True,
             "session_id": final_result.get("session_id") if final_result else session_id,
@@ -231,10 +228,10 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
     except Exception as e:
         await agent_service.write_task_stream(task_id, {"type": "error", "content": str(e)}, session_id)
         await agent_service.write_task_stream(task_id, {"type": "end", "content": "任务失败"}, session_id)
-        if session_id:
-            await agent_service.clear_session_task(session_id)
         return {"success": False, "error": str(e)}
     finally:
+        if session_id:
+            await agent_service.clear_session_task(session_id, task_id)
         if owns_resources:
             await _close_task_agent_service(agent_service)
             await close_db()
@@ -321,9 +318,6 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
                 session_id,
             )
 
-        if session_id:
-            await agent_service.clear_session_task(session_id)
-
         return {
             "success": True,
             "session_id": session_id,
@@ -334,10 +328,10 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
         logger.error(f"自动继续失败: {e}")
         await agent_service.write_task_stream(task_id, {"type": "error", "content": str(e)}, session_id)
         await agent_service.write_task_stream(task_id, {"type": "end", "content": "自动继续失败"}, session_id)
-        if session_id:
-            await agent_service.clear_session_task(session_id)
         return {"success": False, "error": str(e)}
     finally:
+        if session_id:
+            await agent_service.clear_session_task(session_id, task_id)
         if owns_resources:
             await _close_task_agent_service(agent_service)
             await close_db()

@@ -137,6 +137,30 @@ def _build_kuncode_completion_message(files: list[str]) -> str:
         "文件已同步到右上角的“文件”页，可在那里打开、预览或下载。"
     )
 
+
+def _build_terminal_tool_results(
+    pending_tool_calls: Dict[str, str],
+    *,
+    status: str = "failed",
+) -> list[dict]:
+    """Close tool calls that never received a real streamed result."""
+    cancelled = status == "cancelled"
+    return [
+        {
+            "type": "tool_result",
+            "content": (
+                f"[CANCELLED] {tool_name or '工具'} 已中断。"
+                if cancelled
+                else f"[ERROR] {tool_name or '工具'} 未返回完整执行结果。"
+            ),
+            "tool_id": tool_id,
+            "phase": "cancelled" if cancelled else "failed",
+            "execution_status": "cancelled" if cancelled else "failed",
+        }
+        for tool_id, tool_name in pending_tool_calls.items()
+        if tool_id
+    ]
+
 import redis.asyncio as aioredis
 
 from agentscope.agent import ReActAgent
@@ -647,7 +671,7 @@ class AgentService:
                 if compress_provider.lower() == "deepseek":
                     api_key = settings.DEEPSEEK_API_KEY
                     base_url = settings.DEEPSEEK_BASE_URL
-                    model_name = settings.COMPRESS_MODEL_NAME or "deepseek-chat"
+                    model_name = settings.COMPRESS_MODEL_NAME or settings.DEEPSEEK_MODEL_NAME
                 else:
                     api_key = settings.OPENAI_API_KEY
                     base_url = settings.OPENAI_BASE_URL
@@ -999,6 +1023,8 @@ class AgentService:
                         "type": "tool_result",
                         "content": accumulated_output,
                         "tool_id": tool_id,
+                        "phase": "progress",
+                        "execution_status": "running",
                     }
         except Exception as e:
             accumulated_output = f"[ERROR] KunCode direct execution failed: {e}"
@@ -1009,6 +1035,8 @@ class AgentService:
                 "type": "tool_result",
                 "content": accumulated_output,
                 "tool_id": tool_id,
+                "phase": "failed",
+                "execution_status": "failed",
             }
         else:
             if not accumulated_output.strip():
@@ -1017,6 +1045,8 @@ class AgentService:
                     "type": "tool_result",
                     "content": accumulated_output,
                     "tool_id": tool_id,
+                    "phase": "failed",
+                    "execution_status": "failed",
                 }
 
             is_error = "[ERROR]" in accumulated_output
@@ -1026,6 +1056,16 @@ class AgentService:
                 if is_error
                 else _build_kuncode_completion_message(generated_files)
             )
+
+        # The streaming chunks above are progress updates. Emit one explicit
+        # final result so clients can stop the tool spinner deterministically.
+        yield {
+            "type": "tool_result",
+            "content": accumulated_output,
+            "tool_id": tool_id,
+            "phase": "failed" if is_error else "completed",
+            "execution_status": "failed" if is_error else "completed",
+        }
 
         if db_session:
             output_message = {
@@ -1231,6 +1271,12 @@ class AgentService:
                             await self._add_interrupted_tool_results(
                                 user_id, session_id, pending_tool_calls
                             )
+                            for terminal_event in _build_terminal_tool_results(
+                                pending_tool_calls,
+                                status="cancelled",
+                            ):
+                                yield terminal_event
+                            pending_tool_calls.clear()
                         
                         yield {"type": "interrupted", "content": "用户中断了执行"}
                         break
@@ -1295,12 +1341,19 @@ class AgentService:
                                         output = item.get("output", [])
                                         text_parts = [o.get("text", "") for o in output if isinstance(o, dict) and o.get("type") == "text"]
                                         tool_id = item.get("tool_use_id", "")
+                                        result_text = "".join(text_parts)
+                                        is_error = any(
+                                            marker in result_text.lower()
+                                            for marker in ("[error]", "traceback", "exception", "failed")
+                                        )
                                         # 移除已完成的 tool_call
                                         pending_tool_calls.pop(tool_id, None)
                                         yield {
                                             "type": "tool_result",
-                                            "content": "".join(text_parts),
+                                            "content": result_text,
                                             "tool_id": tool_id,
+                                            "phase": "failed" if is_error else "completed",
+                                            "execution_status": "failed" if is_error else "completed",
                                         }
                                     else:
                                         yield {"type": block_type, "content": filter_model_tokens(str(item))}
@@ -1348,6 +1401,11 @@ class AgentService:
                         raise exc
             
             # 整个对话完成后保存状态
+            # Close omitted tool results without claiming an unobserved success.
+            for terminal_event in _build_terminal_tool_results(pending_tool_calls):
+                yield terminal_event
+            pending_tool_calls.clear()
+
             state_to_save = agent.state_dict()
             await self.state_service.save_state(
                 user_id=user_id,
@@ -1605,9 +1663,11 @@ class AgentService:
         task_id = await self._redis.get(key)
         return task_id
     
-    async def clear_session_task(self, session_id: str) -> None:
+    async def clear_session_task(self, session_id: str, task_id: str | None = None) -> None:
         """清除会话的当前任务"""
         key = f"session_task:{session_id}"
+        if task_id is not None and await self._redis.get(key) != task_id:
+            return
         await self._redis.delete(key)
     
     async def write_task_stream(self, task_id: str, data: dict, session_id: str = None) -> None:
@@ -1617,7 +1677,7 @@ class AgentService:
         event_type = event.get("type", "status")
         phase, execution_status = {
             "tool_call": ("started", "running"),
-            "tool_result": ("progress", "running"),
+            "tool_result": ("completed", "completed"),
             "error": ("failed", "failed"),
             "interrupted": ("cancelled", "cancelled"),
             "end": ("completed", "completed"),

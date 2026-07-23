@@ -170,23 +170,35 @@ class SandboxInjectionService:
             logger.error(f"执行命令失败: {e}")
             return -1, str(e)
     
-    def _ensure_mimo_provider(self, kuncode_config: dict) -> None:
-        """Ensure KunCode can use Mimo through an OpenAI-compatible provider."""
-        if kuncode_config.get("model") == "mimo-v2.5-pro":
-            kuncode_config["model"] = "mimo/mimo-v2.5-pro"
-        kuncode_config.setdefault("small_model", kuncode_config.get("model", "{env:KUNCODE_MODEL}"))
+    def _ensure_deepseek_provider(self, kuncode_config: dict) -> None:
+        """Ensure KunCode defaults to DeepSeek through its OpenAI-compatible API."""
+        deepseek_model = "deepseek/deepseek-v4-flash"
+        if kuncode_config.get("model") in {
+            None,
+            "{env:KUNCODE_MODEL}",
+            "mimo-v2.5-pro",
+            "mimo/mimo-v2.5-pro",
+        }:
+            kuncode_config["model"] = deepseek_model
+        if kuncode_config.get("small_model") in {
+            None,
+            "{env:KUNCODE_MODEL}",
+            "mimo-v2.5-pro",
+            "mimo/mimo-v2.5-pro",
+        }:
+            kuncode_config["small_model"] = kuncode_config["model"]
 
         providers = kuncode_config.setdefault("provider", {})
-        providers["mimo"] = {
+        providers["deepseek"] = {
             "npm": "@ai-sdk/openai-compatible",
-            "name": "Mimo",
+            "name": "DeepSeek",
             "options": {
-                "apiKey": "{env:MIMO_API_KEY}",
-                "baseURL": "{env:MIMO_BASE_URL}",
+                "apiKey": "{env:DEEPSEEK_API_KEY}",
+                "baseURL": "{env:DEEPSEEK_BASE_URL}",
             },
             "models": {
-                "mimo-v2.5-pro": {
-                    "name": "mimo-v2.5-pro",
+                "deepseek-v4-flash": {
+                    "name": "deepseek-v4-flash",
                     "tool_call": True,
                     "temperature": True,
                     "limit": {
@@ -322,7 +334,7 @@ class SandboxInjectionService:
         else:
             kuncode_config = json.loads(output)
 
-        self._ensure_mimo_provider(kuncode_config)
+        self._ensure_deepseek_provider(kuncode_config)
         
         # 更新 MCP 配置（仅合并，不覆盖其他字段）
         if "mcp" not in kuncode_config:
