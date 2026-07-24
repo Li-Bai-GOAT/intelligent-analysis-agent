@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { Api } from '../api/client'
-import type { Session, Message, StreamData } from '../types'
+import type { Session, Message, StreamData, PlanData } from '../types'
 import { useUiStore } from './ui'
 import { extractMessageContent, finalizeTurnMessages, mergeThinking, projectHistoryMessages } from './conversationProjection'
 
@@ -53,6 +53,73 @@ export interface PendingPreview {
   [key: string]: unknown
 }
 
+let pendingPreviewPollHandle: number | null = null
+
+function stopPendingPreviewPolling() {
+  if (pendingPreviewPollHandle != null) {
+    window.clearInterval(pendingPreviewPollHandle)
+    pendingPreviewPollHandle = null
+  }
+}
+
+function startPendingPreviewPolling(sessionId: string, getState: () => SessionState, loadPendingPreview: (sessionId?: string) => Promise<void>) {
+  stopPendingPreviewPolling()
+  pendingPreviewPollHandle = window.setInterval(() => {
+    const state = getState()
+    if (state.currentSession !== sessionId || state.pendingPreview || !state.isStreaming) {
+      stopPendingPreviewPolling()
+      return
+    }
+    void loadPendingPreview(sessionId)
+  }, 500)
+}
+
+function pendingPreviewFromResponse(data: Record<string, unknown>): PendingPreview | null {
+  if (!data.has_pending) return null
+  const previewType = data.preview_type
+  if (previewType === 'auto_triggered') {
+    return {
+      type: 'auto_continue',
+      preview_id: String(data.preview_id || 'auto_continue'),
+      task_id: typeof data.task_id === 'string' ? data.task_id : undefined,
+    }
+  }
+  if (previewType === 'auto_continue') {
+    return {
+      type: 'auto_continue',
+      preview_id: String(data.preview_id || 'auto_continue'),
+      remaining_seconds: typeof data.remaining_seconds === 'number' ? data.remaining_seconds : undefined,
+    }
+  }
+  const preview = data.preview && typeof data.preview === 'object' ? data.preview as Record<string, unknown> : {}
+  if (previewType === 'plan') {
+    return {
+      type: 'plan_preview',
+      preview_id: String(preview.preview_id || data.preview_id || 'plan_preview'),
+      remaining_seconds: typeof data.remaining_seconds === 'number' ? data.remaining_seconds : undefined,
+      name: typeof data.name === 'string' ? data.name : typeof preview.name === 'string' ? preview.name : '',
+      subtasks: Array.isArray(data.subtasks) ? data.subtasks : Array.isArray(preview.subtasks) ? preview.subtasks : [],
+    }
+  }
+  if (previewType === 'ask_user') {
+    return {
+      type: 'user_input_required',
+      preview_id: String(preview.preview_id || data.preview_id || 'ask_user'),
+      remaining_seconds: typeof data.remaining_seconds === 'number' ? data.remaining_seconds : undefined,
+    }
+  }
+  if (previewType === 'kuncode') {
+    return {
+      type: 'kuncode_preview',
+      preview_id: String(preview.preview_id || data.preview_id || 'kuncode_preview'),
+      prompt: typeof preview.prompt === 'string' ? preview.prompt : '',
+      agent: typeof preview.agent === 'string' ? preview.agent : undefined,
+      remaining_seconds: typeof data.remaining_seconds === 'number' ? data.remaining_seconds : undefined,
+    }
+  }
+  return null
+}
+
 interface SessionState {
   sessions: Session[]
   currentSession: string | null
@@ -65,6 +132,9 @@ interface SessionState {
   currentEventSource: StreamConnection | null
   _selectVersion: number
   pendingPreview: PendingPreview | null
+  currentPlan: PlanData | null
+  planLoading: boolean
+  planError: string | null
 
   loadSessions: () => Promise<void>
   selectSession: (sessionId: string) => Promise<void>
@@ -74,6 +144,8 @@ interface SessionState {
   addPendingFiles: (files: File[]) => void
   removePendingFile: (index: number) => void
   clearPendingFiles: () => void
+  loadPlan: (sessionId?: string) => Promise<void>
+  loadPendingPreview: (sessionId?: string) => Promise<void>
   handleStreamData: (data: StreamData) => void
   disconnectStream: () => void
   addMessage: (msg: Message) => void
@@ -102,6 +174,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   currentEventSource: null,
   _selectVersion: 0,
   pendingPreview: null,
+  currentPlan: null,
+  planLoading: false,
+  planError: null,
 
   loadSessions: async () => {
     try {
@@ -112,9 +187,46 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
+  loadPlan: async (sessionId?: string) => {
+    const activeSession = sessionId || get().currentSession
+    if (!activeSession) {
+      set({ currentPlan: null, planLoading: false, planError: null })
+      return
+    }
+
+    set({ planLoading: true, planError: null })
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error('加载计划超时')), 8000)
+      })
+      const data = await Promise.race([Api.getPlan(activeSession), timeout])
+      set({ currentPlan: (data as unknown as PlanData | null) || null, planLoading: false, planError: null })
+    } catch (err) {
+      console.error('Load plan error:', err)
+      set((current) => ({
+        currentPlan: current.currentPlan,
+        planLoading: false,
+        planError: err instanceof Error ? err.message : '加载计划失败',
+      }))
+    }
+  },
+
+  loadPendingPreview: async (sessionId?: string) => {
+    const activeSession = sessionId || get().currentSession
+    if (!activeSession) return
+    try {
+      const data = await Api.getPendingPreview(activeSession)
+      const pending = pendingPreviewFromResponse(data)
+      if (pending) set({ pendingPreview: pending })
+    } catch (err) {
+      console.error('Load pending preview error:', err)
+    }
+  },
+
   selectSession: async (sessionId: string) => {
     const state = get()
     state.disconnectStream()
+    stopPendingPreviewPolling()
 
     const version = state._selectVersion + 1
     set({
@@ -123,6 +235,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       messages: [],
       isStreaming: false,
       pendingPreview: null,
+      currentPlan: null,
+      planLoading: true,
+      planError: null,
       streamState: {
         activeTurnId: null,
         thinkingBlock: null,
@@ -144,6 +259,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       let messages = projectHistoryMessages(rawMessages)
 
       set({ messages, contextInfo: detail.context_info || null })
+
+      await get().loadPlan(sessionId)
+      await get().loadPendingPreview(sessionId)
+
+      if (get().pendingPreview) {
+        stopPendingPreviewPolling()
+      } else if (get().isStreaming) {
+        startPendingPreviewPolling(sessionId, get, get().loadPendingPreview)
+      }
 
       // 检查活跃任务（断点续传）
       const taskInfo = await Api.getSessionTask(sessionId)
@@ -199,7 +323,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       await Api.deleteSession(sessionId)
       const state = get()
       if (state.currentSession === sessionId) {
-        set({ currentSession: null, messages: [] })
+        set({ currentSession: null, messages: [], currentPlan: null, planLoading: false, planError: null })
       }
       await state.loadSessions()
     } catch (err) {
@@ -251,6 +375,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ],
         pendingFiles: [],
         uploadedFileIds: fileIds,
+        currentPlan: null,
+        planLoading: true,
+        planError: null,
         streamState: {
           activeTurnId: result.task_id,
           thinkingBlock: null,
@@ -412,13 +539,56 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         if (data.context_info) set({ contextInfo: data.context_info })
         break
       }
+      case 'plan': {
+        const plan = {
+          name: data.name || data.content || '分析计划',
+          description: data.description || '',
+          expected_outcome: data.expected_outcome || '',
+          state: data.phase === 'completed' ? 'done' : data.phase === 'failed' ? 'failed' : data.phase === 'cancelled' ? 'abandoned' : (data.execution_status || 'running'),
+          subtasks: Array.isArray(data.subtasks)
+            ? data.subtasks.map((task) => ({
+                name: task.name || '',
+                description: task.description || '',
+                expected_outcome: task.expected_outcome || '',
+                state: task.state || 'todo',
+              }))
+            : [],
+        } satisfies PlanData
+        set({ currentPlan: plan, planLoading: false, planError: null })
+        break
+      }
       case 'kuncode_preview':
-      case 'plan_preview':
       case 'user_input_request':
       case 'user_input_required':
       case 'auto_continue': {
         // Human-in-the-loop 预览确认事件
         set({ pendingPreview: data as unknown as PendingPreview })
+        break
+      }
+      case 'plan_preview': {
+        set({
+          pendingPreview: data as unknown as PendingPreview,
+          currentPlan: {
+            name: data.name || data.content || '分析计划',
+            description: data.description || '',
+            expected_outcome: data.expected_outcome || '',
+            state: 'todo',
+            subtasks: Array.isArray(data.subtasks)
+              ? data.subtasks.map((task) => ({
+                  name: task.name || '',
+                  description: task.description || '',
+                  expected_outcome: task.expected_outcome || '',
+                  state: task.state || 'todo',
+                }))
+              : [],
+          } satisfies PlanData,
+          planLoading: false,
+          planError: null,
+        })
+        const current = get()
+        if (current.streamState.activeTurnId) {
+          startPendingPreviewPolling(current.currentSession || '', get, get().loadPendingPreview)
+        }
         break
       }
       case 'status':
@@ -435,6 +605,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           ),
           streamState: { ...current.streamState, activeTurnId: null },
         }))
+        stopPendingPreviewPolling()
+        void get().loadPlan()
         break
       case 'error':
         set((current) => {

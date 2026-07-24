@@ -34,11 +34,48 @@ function contentData(content: unknown): Record<string, unknown> | null {
   return null
 }
 
-function resultStatus(output: string): ToolExecutionStatus {
-  const lower = output.toLowerCase()
-  return lower.includes('[error]') || lower.includes('traceback') || lower.includes('exception') || lower.includes('failed')
-    ? 'failed'
-    : 'completed'
+export function resultStatus(output: string): ToolExecutionStatus {
+  let rendered = output
+  try {
+    const parsed = JSON.parse(output)
+    if (Array.isArray(parsed)) {
+      rendered = parsed.map((item) => {
+        if (!item || typeof item !== 'object') return ''
+        const value = item as Record<string, unknown>
+        return String(value.text ?? value.content ?? '')
+      }).join('')
+    } else if (parsed && typeof parsed === 'object') {
+      const value = parsed as Record<string, unknown>
+      rendered = String(value.text ?? value.output ?? value.content ?? output)
+    }
+  } catch {
+    // Plain text tool output needs no decoding.
+  }
+
+  const lower = rendered.toLowerCase().trim()
+  if (!lower) return 'failed'
+  const errorIndex = Math.max(
+    lower.lastIndexOf('[error]'),
+    lower.lastIndexOf('traceback'),
+    lower.lastIndexOf('exception'),
+  )
+  const recoveryIndex = Math.max(
+    lower.lastIndexOf('successfully'),
+    lower.lastIndexOf('completed successfully'),
+    lower.lastIndexOf('已成功'),
+    lower.lastIndexOf('成功生成'),
+    lower.lastIndexOf('已生成'),
+    lower.lastIndexOf('核对通过'),
+    lower.lastIndexOf('验证通过'),
+    lower.lastIndexOf('输出成功'),
+    lower.lastIndexOf('文件已输出'),
+  )
+  const lastLine = lower.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) || ''
+  const legacyHint = lastLine.startsWith('[error] kuncode execution failed')
+
+  if (legacyHint && recoveryIndex > lower.lastIndexOf('traceback')) return 'completed'
+  if (lastLine.startsWith('[error]') || lastLine.startsWith('[cancelled]')) return 'failed'
+  return errorIndex >= 0 && recoveryIndex < errorIndex ? 'failed' : 'completed'
 }
 
 export function mergeThinking(previous: string | undefined, next: string): string {
@@ -56,14 +93,29 @@ export function mergeThinking(previous: string | undefined, next: string): strin
   // "刚才" -> "刚才K" -> "刚才KunCode...". Replace the active phase
   // in place so the expanded thinking block does not list every snapshot.
   const separator = '\n\n'
-  const phaseStart = current.lastIndexOf(separator)
-  const completedPhases = phaseStart >= 0 ? current.slice(0, phaseStart) : ''
-  const activePhase = phaseStart >= 0 ? current.slice(phaseStart + separator.length) : current
-
-  if (activePhase && clean.startsWith(activePhase)) {
-    return completedPhases ? `${completedPhases}${separator}${clean}` : clean
+  const candidateStarts = [0]
+  let separatorIndex = current.indexOf(separator)
+  while (separatorIndex >= 0) {
+    candidateStarts.push(separatorIndex + separator.length)
+    separatorIndex = current.indexOf(separator, separatorIndex + separator.length)
   }
-  if (activePhase.startsWith(clean)) return current
+
+  // The active reasoning phase may contain its own blank paragraphs, so the
+  // final separator is not necessarily the phase boundary. Find the longest
+  // suffix that is a prefix of the new cumulative snapshot and replace that
+  // suffix in place.
+  let cumulativePhaseStart = -1
+  let cumulativePhaseLength = -1
+  for (const start of candidateStarts) {
+    const candidate = current.slice(start)
+    if (candidate && clean.startsWith(candidate) && candidate.length > cumulativePhaseLength) {
+      cumulativePhaseStart = start
+      cumulativePhaseLength = candidate.length
+    }
+  }
+  if (cumulativePhaseStart >= 0) {
+    return `${current.slice(0, cumulativePhaseStart)}${clean}`
+  }
 
   return `${current}${separator}${clean}`
 }

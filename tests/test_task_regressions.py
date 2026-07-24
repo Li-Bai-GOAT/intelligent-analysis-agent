@@ -2,8 +2,9 @@ import asyncio
 import tarfile
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import HTTPException
 
@@ -17,8 +18,11 @@ from app.services.agent_service import (
     _build_kuncode_completion_message,
     _extract_persisted_tool_results,
     _extract_workspace_files,
+    _tool_output_failed,
 )
+from data_analysis_sandbox import _is_kuncode_failure
 from app.services.sandbox_injection import SandboxInjectionService
+from app.services.sandbox_cleanup_service import SandboxCleanupService
 from app.tasks import _local_tasks, start_local_task
 
 
@@ -137,6 +141,20 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         failed = _build_streamed_tool_result("call-2", "[ERROR] sandbox failed")
         self.assertEqual(failed["execution_status"], "failed")
 
+    async def test_recovered_intermediate_error_keeps_successful_final_status(self):
+        recovered = (
+            "Traceback (most recent call last):\nFileNotFoundError: report.html\n"
+            "Created reports directory\nReport generated successfully!\n"
+            "[ERROR] KunCode execution failed. Check the configured agent."
+        )
+
+        self.assertFalse(_tool_output_failed(recovered))
+        self.assertFalse(_is_kuncode_failure(
+            "Traceback\nFileNotFoundError\nReport generated successfully!"
+        ))
+        self.assertTrue(_tool_output_failed("Traceback\nRuntimeError: failed"))
+        self.assertTrue(_is_kuncode_failure("[ERROR] KunCode exited with code 1."))
+
     async def test_persisted_tool_output_recovers_an_unstreamed_call(self):
         messages = [
             SimpleNamespace(message={
@@ -156,6 +174,43 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
             messages,
             {"call-1": "run_kuncode", "call-2": "run_kuncode"},
         )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["tool_id"], "call-1")
+        self.assertEqual(events[0]["execution_status"], "completed")
+
+    async def test_agent_service_loads_persisted_terminal_results(self):
+        db_session = SimpleNamespace(id=1)
+        stored_messages = [
+            SimpleNamespace(message={
+                "type": "plugin_call_output",
+                "content": [{
+                    "type": "data",
+                    "data": {
+                        "call_id": "call-1",
+                        "output": "analysis complete",
+                    },
+                }],
+            }),
+        ]
+
+        with (
+            patch.object(
+                SessionRepository,
+                "get",
+                new=AsyncMock(return_value=db_session),
+            ),
+            patch.object(
+                SessionRepository,
+                "get_messages",
+                new=AsyncMock(return_value=stored_messages),
+            ),
+        ):
+            events = await AgentService()._recover_persisted_terminal_results(
+                "user-1",
+                "session-1",
+                {"call-1": "run_kuncode"},
+            )
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["tool_id"], "call-1")
@@ -237,6 +292,120 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         await service.clear_session_task("session-1", "new-task")
         self.assertIsNone(await service.get_session_task("session-1"))
+
+    async def test_idle_sandbox_release_uses_binding_owner_and_marks_inactive(self):
+        cleanup = SandboxCleanupService(idle_timeout_seconds=60)
+        cleanup._last_activity["session-1"] = datetime.now() - timedelta(minutes=5)
+        cleanup._session_users["session-1"] = "user-1"
+        sandbox_service = SimpleNamespace(release=Mock())
+        agent_service = SimpleNamespace(
+            sandbox_service=sandbox_service,
+            _active_agents={},
+            _redis=FakeRedis(),
+        )
+
+        with (
+            patch(
+                "app.services.agent_service.AgentService.get_instance",
+                return_value=agent_service,
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.update",
+                new=AsyncMock(),
+            ) as update_binding,
+        ):
+            await cleanup._cleanup_idle_sessions()
+
+        sandbox_service.release.assert_called_once_with("session-1", "user-1")
+        update_binding.assert_awaited_once_with("session-1", is_active=False)
+        self.assertNotIn("session-1", cleanup._last_activity)
+
+    async def test_active_task_prevents_idle_sandbox_release(self):
+        cleanup = SandboxCleanupService(idle_timeout_seconds=60)
+        cleanup._last_activity["session-1"] = datetime.now() - timedelta(minutes=5)
+        cleanup._session_users["session-1"] = "user-1"
+        sandbox_service = SimpleNamespace(release=Mock())
+        redis = FakeRedis()
+        redis.values["session_task:session-1"] = "task-1"
+        agent_service = SimpleNamespace(
+            sandbox_service=sandbox_service,
+            _active_agents={},
+            _redis=redis,
+        )
+
+        with patch(
+            "app.services.agent_service.AgentService.get_instance",
+            return_value=agent_service,
+        ):
+            await cleanup._cleanup_idle_sessions()
+
+        sandbox_service.release.assert_not_called()
+        self.assertIn("session-1", cleanup._last_activity)
+
+    async def test_startup_restores_active_sandbox_scope_from_database(self):
+        cleanup = SandboxCleanupService()
+        binding_time = datetime.now() - timedelta(hours=4)
+        session_time = datetime.now() - timedelta(minutes=30)
+        binding = SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            sandbox_id="data-sandbox-1",
+            updated_at=binding_time,
+        )
+        session = SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            updated_at=session_time,
+        )
+
+        with (
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.list_active",
+                new=AsyncMock(return_value=[binding]),
+            ),
+            patch(
+                "app.repositories.session_repo.SessionRepository.list_by_session_ids",
+                new=AsyncMock(return_value=[session]),
+            ),
+        ):
+            await cleanup._restore_from_persisted_bindings()
+
+        self.assertEqual(cleanup._session_users["session-1"], "user-1")
+        self.assertEqual(cleanup._last_activity["session-1"], session_time)
+
+    async def test_orphan_cleanup_uses_labels_and_preserves_bound_or_recent_sandboxes(self):
+        cleanup = SandboxCleanupService(idle_timeout_seconds=60)
+        cleanup._session_sandbox_ids["session-1"] = "data-sandbox-bound"
+        old_created = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        recent_created = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+        labels = json.dumps({
+            "maintainer": "kuncode-data-analysis-sandbox",
+            "description": "Data Analysis Sandbox with KunCode AI",
+        })
+        commands = []
+
+        def run_docker(arguments):
+            commands.append(arguments)
+            if arguments[0] == "ps":
+                return "bound-id\norphan-id\nrecent-id\n"
+            if arguments[0] == "inspect":
+                container_id = arguments[-1]
+                if container_id == "bound-id":
+                    return f"bound-id|/data-sandbox-bound|{old_created}|{labels}\n"
+                if container_id == "orphan-id":
+                    return f"orphan-id|/data-sandbox-orphan|{old_created}|{labels}\n"
+                return f"recent-id|/data-sandbox-recent|{recent_created}|{labels}\n"
+            if arguments[0] == "rm":
+                return "orphan-id\n"
+            self.fail(f"Unexpected Docker arguments: {arguments}")
+
+        with (
+            patch.object(cleanup, "_has_any_active_task", new=AsyncMock(return_value=False)),
+            patch.object(cleanup, "_run_docker", side_effect=run_docker),
+        ):
+            await cleanup._cleanup_orphan_runtime_containers()
+
+        self.assertIn(["rm", "-f", "orphan-id"], commands)
 
     async def test_session_owner_rejects_unknown_session(self):
         with patch.object(SessionRepository, "get", new=AsyncMock(return_value=None)):

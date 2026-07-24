@@ -171,10 +171,7 @@ def _build_streamed_tool_result(tool_id: str, output: Any) -> dict:
     else:
         result_text = json.dumps(output, ensure_ascii=False)
 
-    is_error = any(
-        marker in result_text.lower()
-        for marker in ("[error]", "traceback", "exception", "failed")
-    )
+    is_error = _tool_output_failed(result_text)
     return {
         "type": "tool_result",
         "content": result_text,
@@ -182,6 +179,64 @@ def _build_streamed_tool_result(tool_id: str, output: Any) -> dict:
         "phase": "failed" if is_error else "completed",
         "execution_status": "failed" if is_error else "completed",
     }
+
+
+def _tool_output_failed(output: str) -> bool:
+    """Judge the final tool outcome without treating recovered errors as fatal."""
+    rendered = output
+    try:
+        parsed = json.loads(output)
+        if isinstance(parsed, list):
+            rendered = "".join(
+                str(item.get("text") or item.get("content") or "")
+                for item in parsed
+                if isinstance(item, dict)
+            )
+        elif isinstance(parsed, dict):
+            rendered = str(
+                parsed.get("text")
+                or parsed.get("output")
+                or parsed.get("content")
+                or output
+            )
+    except (TypeError, json.JSONDecodeError):
+        pass
+
+    lowered = rendered.lower().strip()
+    if not lowered:
+        return True
+
+    error_index = max(
+        lowered.rfind("[error]"),
+        lowered.rfind("traceback"),
+        lowered.rfind("exception"),
+    )
+    recovery_index = max(
+        lowered.rfind("successfully"),
+        lowered.rfind("completed successfully"),
+        lowered.rfind("已成功"),
+        lowered.rfind("成功生成"),
+        lowered.rfind("已生成"),
+        lowered.rfind("核对通过"),
+        lowered.rfind("验证通过"),
+        lowered.rfind("输出成功"),
+        lowered.rfind("文件已输出"),
+    )
+    last_line = next(
+        (line.strip() for line in reversed(lowered.splitlines()) if line.strip()),
+        "",
+    )
+
+    # Older sandbox adapters appended this generic hint even after KunCode
+    # recovered from an intermediate command error. A later success signal is
+    # authoritative for those persisted records.
+    legacy_hint = last_line.startswith("[error] kuncode execution failed")
+    if legacy_hint and recovery_index > lowered.rfind("traceback"):
+        return False
+
+    if last_line.startswith(("[error]", "[cancelled]")):
+        return True
+    return error_index >= 0 and recovery_index < error_index
 
 
 def _extract_persisted_tool_results(
@@ -964,21 +1019,74 @@ class AgentService:
             skip_count = summary.get("covered_count", 0)
             logger.info(f"已注入历史摘要到系统提示词，跳过 {skip_count} 条已覆盖消息")
         
+        latest_plan_snapshot: dict[str, Any] | None = None
+
         if plan_callback:
+            def _normalize_plan_subtask(subtask) -> dict:
+                return {
+                    "name": getattr(subtask, "name", "") or "",
+                    "description": getattr(subtask, "description", None),
+                    "expected_outcome": getattr(subtask, "expected_outcome", None),
+                    "state": getattr(subtask, "state", "todo") or "todo",
+                }
+
+            def _normalize_plan(plan) -> dict:
+                return {
+                    "name": getattr(plan, "name", "") or "",
+                    "description": getattr(plan, "description", None),
+                    "expected_outcome": getattr(plan, "expected_outcome", None),
+                    "state": getattr(plan, "state", "todo") or "todo",
+                    "subtasks": [_normalize_plan_subtask(subtask) for subtask in getattr(plan, "subtasks", []) or []],
+                }
+
             def plan_change_hook(notebook: PlanNotebook, plan) -> None:
-                """计划变更钩子 - 仅更新前端显示，不做预览等待"""
+                """计划变更钩子 - 同步更新前端与持久化状态"""
+                nonlocal latest_plan_snapshot
                 if plan is None:
                     return
-                subtasks = []
-                for subtask in plan.subtasks:
-                    subtasks.append({
-                        "name": subtask.name,
-                        "state": subtask.state,
-                    })
+
+                plan_data = _normalize_plan(plan)
+                latest_plan_snapshot = plan_data
+
                 # 直接更新计划显示
-                plan_callback(plan.name, plan.state, subtasks)
-            
+                plan_callback(
+                    plan_data["name"],
+                    plan_data["state"],
+                    [{"name": item["name"], "state": item["state"]} for item in plan_data["subtasks"]],
+                )
+
+                async def _persist_plan_state() -> None:
+                    try:
+                        state = await self.state_service.export_state(user_id, session_id)
+                        if not state:
+                            state = {}
+                        state.setdefault("plan_notebook", {})["current_plan"] = plan_data
+                        await self.state_service.save_state(user_id, state, session_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Persist plan state failed: user=%s session=%s error=%s",
+                            user_id,
+                            session_id,
+                            exc,
+                        )
+
+                try:
+                    asyncio.create_task(_persist_plan_state())
+                except Exception as exc:
+                    logger.warning(
+                        "Schedule persist plan state failed: user=%s session=%s error=%s",
+                        user_id,
+                        session_id,
+                        exc,
+                    )
+
             plan_notebook.register_plan_change_hook("stream_plan_hook", plan_change_hook)
+            if latest_plan_snapshot is not None:
+                plan_callback(
+                    latest_plan_snapshot["name"],
+                    latest_plan_snapshot["state"],
+                    [{"name": item["name"], "state": item["state"]} for item in latest_plan_snapshot["subtasks"]],
+                )
         
         # 使用工厂模式创建模型和格式化器
         model, formatter, token_counter = ModelFactory.create_model_and_formatter(
@@ -1213,7 +1321,7 @@ class AgentService:
         
         # 更新会话活跃时间（用于空闲超时检测）
         if self.cleanup_service:
-            self.cleanup_service.touch(session_id)
+            self.cleanup_service.touch(session_id, user_id, sandbox.sandbox_id)
         
         try:
             if sandbox_recreated:
@@ -1472,15 +1580,13 @@ class AgentService:
             # before treating any genuinely unresolved call as failed.
             if pending_tool_calls:
                 try:
-                    db_session = await SessionRepository.get(user_id, session_id)
-                    if db_session:
-                        stored_messages = await SessionRepository.get_messages(db_session)
-                        for terminal_event in _extract_persisted_tool_results(
-                            stored_messages,
-                            pending_tool_calls,
-                        ):
-                            pending_tool_calls.pop(terminal_event["tool_id"], None)
-                            yield terminal_event
+                    for terminal_event in await self._recover_persisted_terminal_results(
+                        user_id,
+                        session_id,
+                        pending_tool_calls,
+                    ):
+                        pending_tool_calls.pop(terminal_event["tool_id"], None)
+                        yield terminal_event
                 except Exception as recovery_error:
                     logger.warning(
                         "Failed to recover persisted tool results: session=%s error=%s",
@@ -1715,6 +1821,24 @@ class AgentService:
             # 在对应的 plugin_call 后插入，确保顺序正确
             await SessionRepository.insert_after_plugin_call(db_session, tool_id, interrupted_result)
             logger.info(f"已为中断的 tool_call {tool_id} ({tool_name}) 添加 plugin_call_output")
+
+    async def _recover_persisted_terminal_results(
+        self,
+        user_id: str,
+        session_id: str,
+        pending_tool_calls: Dict[str, str],
+    ) -> list[dict]:
+        """Load paired tool outputs that were persisted but not streamed."""
+        from app.repositories.session_repo import SessionRepository
+
+        db_session = await SessionRepository.get(user_id, session_id)
+        if not db_session:
+            return []
+        stored_messages = await SessionRepository.get_messages(db_session)
+        return _extract_persisted_tool_results(
+            stored_messages,
+            pending_tool_calls,
+        )
     
     async def set_session_task(self, session_id: str, task_id: str) -> None:
         """设置会话的当前任务"""
@@ -1963,7 +2087,7 @@ class AgentService:
         
         binding = await SandboxBindingRepository.get_by_session(session_id)
         if binding:
-            if binding.sandbox_id != sandbox_id:
+            if binding.sandbox_id != sandbox_id or not binding.is_active:
                 await SandboxBindingRepository.update(
                     session_id=session_id,
                     sandbox_id=sandbox_id,
