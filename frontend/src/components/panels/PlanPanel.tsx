@@ -1,26 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { AlertCircle, CheckCircle2, Circle, Clock, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { Api } from '../../api/client'
 import { useSessionStore } from '../../stores/session'
+import type { PlanData, PlanSubtaskData } from '../../types'
 
 type ApiSubtaskState = 'todo' | 'in_progress' | 'done' | 'failed' | 'abandoned'
 type ViewSubtaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
-
-interface ApiSubtask {
-  name: string
-  description?: string | null
-  expected_outcome?: string | null
-  state?: ApiSubtaskState | string
-}
-
-interface ApiPlanData {
-  name: string
-  description?: string | null
-  expected_outcome?: string | null
-  state?: string
-  subtasks?: ApiSubtask[]
-}
 
 interface ViewSubtask {
   title: string
@@ -67,13 +53,13 @@ function normalizeStatus(state?: string): ViewSubtaskStatus {
   return 'pending'
 }
 
-function toViewPlan(data: ApiPlanData | null | undefined): ViewPlanData | null {
+function toViewPlan(data: PlanData | null | undefined): ViewPlanData | null {
   if (!data || !data.name) return null
   return {
     goal: data.name,
     description: data.description || '',
     expectedOutcome: data.expected_outcome || '',
-    subtasks: (data.subtasks || []).map((task) => ({
+    subtasks: (data.subtasks || []).map((task: PlanSubtaskData) => ({
       title: task.name || '未命名子任务',
       description: task.description || '',
       expectedOutcome: task.expected_outcome || '',
@@ -85,33 +71,14 @@ function toViewPlan(data: ApiPlanData | null | undefined): ViewPlanData | null {
 
 export function PlanPanel() {
   const currentSession = useSessionStore((s) => s.currentSession)
-  const [plan, setPlan] = useState<ViewPlanData | null>(null)
+  const currentPlan = useSessionStore((s) => s.currentPlan)
+  const loading = useSessionStore((s) => s.planLoading)
+  const planError = useSessionStore((s) => s.planError)
+  const loadPlan = useSessionStore((s) => s.loadPlan)
   const [editing, setEditing] = useState(false)
-  const [loading, setLoading] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
 
-  const loadPlan = useCallback(async () => {
-    if (!currentSession) {
-      setPlan(null)
-      return
-    }
-    setLoading(true)
-    try {
-      const data = await Api.getPlan(currentSession) as unknown as ApiPlanData | null
-      setPlan(toViewPlan(data))
-    } catch {
-      setPlan(null)
-    } finally {
-      setLoading(false)
-    }
-  }, [currentSession])
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadPlan()
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [loadPlan])
+  const plan = useMemo(() => toViewPlan(currentPlan), [currentPlan])
 
   const progress = useMemo(() => {
     if (!plan || plan.subtasks.length === 0) return 0
@@ -122,7 +89,7 @@ export function PlanPanel() {
   const handleDelete = async (index: number) => {
     if (!currentSession) return
     await Api.deleteSubtask(currentSession, index)
-    await loadPlan()
+    await loadPlan(currentSession)
   }
 
   const handleAdd = async () => {
@@ -132,7 +99,7 @@ export function PlanPanel() {
       state: 'todo',
     })
     setNewTaskTitle('')
-    await loadPlan()
+    await loadPlan(currentSession)
   }
 
   if (!currentSession) {
@@ -142,10 +109,10 @@ export function PlanPanel() {
   if (!plan) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-text-muted">
-        <div>{loading ? '正在加载计划...' : '暂无分析计划'}</div>
+        <div>{loading ? '正在加载计划...' : planError ? `计划加载失败：${planError}` : '暂无分析计划'}</div>
         <button
           type="button"
-          onClick={() => void loadPlan()}
+          onClick={() => void loadPlan(currentSession)}
           className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-elevated px-3 py-1.5 text-xs text-text-secondary hover:text-accent"
         >
           <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
@@ -163,7 +130,7 @@ export function PlanPanel() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => void loadPlan()}
+              onClick={() => void loadPlan(currentSession)}
               className="rounded-md p-1 text-text-muted hover:bg-bg-hover hover:text-accent"
               title="刷新"
             >

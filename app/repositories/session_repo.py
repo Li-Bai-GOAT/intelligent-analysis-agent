@@ -89,6 +89,13 @@ class SessionRepository:
     @staticmethod
     async def list_by_user(user_id: str) -> List[Session]:
         return await Session.filter(user_id=user_id).order_by("-updated_at")
+
+    @staticmethod
+    async def list_by_session_ids(session_ids: List[str]) -> List[Session]:
+        """批量读取会话，用于恢复沙箱空闲时间。"""
+        if not session_ids:
+            return []
+        return await Session.filter(session_id__in=session_ids).all()
     
     @staticmethod
     async def delete(user_id: str, session_id: str) -> int:

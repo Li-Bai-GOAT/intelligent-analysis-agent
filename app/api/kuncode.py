@@ -614,32 +614,40 @@ async def confirm_plan_preview(
     redis = await _get_redis()
     try:
         pending_key = _get_plan_pending_key(session_id)
-        # 使用会话级别的确认键
         confirm_key = f"plan_confirm:{session_id}"
-        
-        # 保存确认结果
+
+        preview_key = _get_plan_preview_key(session_id, preview_id)
+        preview_data = await redis.get(preview_key)
+        current_preview: dict = {}
+        if preview_data:
+            try:
+                parsed = json.loads(preview_data)
+                if isinstance(parsed, dict):
+                    current_preview = parsed
+            except Exception:
+                current_preview = {}
+
         confirm_data = {
             "action": action,
-            "name": name,
-            "subtasks": subtasks or [],
+            "name": name or current_preview.get("name", ""),
+            "subtasks": subtasks or current_preview.get("subtasks", []),
+            "preview_id": preview_id,
         }
         await redis.set(confirm_key, json.dumps(confirm_data), ex=300)
-        
-        # 清理 pending
+        await redis.set(f"plan_confirmed:{session_id}", json.dumps(confirm_data), ex=300)
+
+        # 清理 pending 仅保留确认结果，避免前端重连时误以为还有未处理预览
         await redis.delete(pending_key)
-        
+
         # 更新预览状态，防止重连时再次加载
         if action in ["confirm", "cancel"]:
-            preview_key = _get_plan_preview_key(session_id, preview_id)
-            preview_data = await redis.get(preview_key)
-            if preview_data:
+            if current_preview:
                 try:
-                    data = json.loads(preview_data)
-                    data["status"] = "confirmed" if action == "confirm" else "cancelled"
+                    current_preview["status"] = "confirmed" if action == "confirm" else "cancelled"
                     if action == "confirm":
-                        data["name"] = name
-                        data["subtasks"] = subtasks or []
-                    await redis.set(preview_key, json.dumps(data), ex=3600)
+                        current_preview["name"] = confirm_data["name"]
+                        current_preview["subtasks"] = confirm_data["subtasks"]
+                    await redis.set(preview_key, json.dumps(current_preview), ex=3600)
                 except Exception:
                     pass
     finally:

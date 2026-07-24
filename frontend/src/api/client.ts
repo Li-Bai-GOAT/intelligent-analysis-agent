@@ -268,8 +268,8 @@ export class Api {
   }
 
   // Plan preview
-  static confirmPlanPreview(sessionId: string, previewId: string, action: 'confirm' | 'cancel') {
-    return this.request('POST', `/kuncode/${sessionId}/plan/confirm/${previewId}`, { action })
+  static confirmPlanPreview(sessionId: string, previewId: string, action: 'confirm' | 'cancel', name?: string, subtasks?: string[]) {
+    return this.request('POST', `/kuncode/${sessionId}/plan/confirm/${previewId}`, { action, name: name || '', subtasks: subtasks || [] })
   }
 
   static cancelPlanPreview(sessionId: string, previewId: string) {

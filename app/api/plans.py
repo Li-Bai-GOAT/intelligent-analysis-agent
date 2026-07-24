@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.models.user import User
 from app.api.deps import get_current_user
 from app.repositories.state_repo import StateRepository
+from app.repositories.session_repo import SessionRepository
 from app.config import settings
 
 router = APIRouter(prefix="/plans", tags=["计划管理"])
@@ -76,9 +77,9 @@ def update_plan_in_state(state: dict, plan_updates: dict) -> dict:
     """更新状态中的计划信息"""
     if "plan_notebook" not in state:
         state["plan_notebook"] = {}
-    
+
     current_plan = state["plan_notebook"].get("current_plan", {})
-    
+
     # 更新计划字段
     if plan_updates.get("name") is not None:
         current_plan["name"] = plan_updates["name"]
@@ -88,69 +89,104 @@ def update_plan_in_state(state: dict, plan_updates: dict) -> dict:
         current_plan["expected_outcome"] = plan_updates["expected_outcome"]
     if plan_updates.get("subtasks") is not None:
         current_plan["subtasks"] = plan_updates["subtasks"]
-    
+
     state["plan_notebook"]["current_plan"] = current_plan
     return state
 
 
-# ==================== API Endpoints ====================
+def _parse_tool_arguments(message: dict) -> tuple[str, dict] | tuple[None, None]:
+    """从历史 plugin_call 中提取工具名和参数。"""
+    msg_type = message.get("type") or message.get("msg_type")
+    if msg_type != "plugin_call":
+        return None, None
 
-@router.get("/{session_id}", response_model=Optional[PlanSchema], summary="获取当前计划")
-async def get_plan(session_id: str, user: User = Depends(get_current_user)):
-    """获取指定会话的当前计划"""
-    state = await StateRepository.get(str(user.id), session_id)
-    if not state:
+    for item in message.get("content", []):
+        if not isinstance(item, dict) or item.get("type") != "data":
+            continue
+        data = item.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        tool_name = data.get("name")
+        raw_arguments = data.get("arguments") or "{}"
+        try:
+            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        except json.JSONDecodeError:
+            arguments = {}
+        if isinstance(tool_name, str) and isinstance(arguments, dict):
+            return tool_name, arguments
+    return None, None
+
+
+def _normalize_subtask(raw: dict | str) -> dict:
+    if isinstance(raw, str):
+        return {"name": raw, "description": None, "expected_outcome": None, "state": "todo"}
+    return {
+        "name": str(raw.get("name") or "未命名子任务"),
+        "description": raw.get("description"),
+        "expected_outcome": raw.get("expected_outcome"),
+        "state": str(raw.get("state") or "todo"),
+    }
+
+
+async def reconstruct_plan_from_history(user_id: str, session_id: str) -> Optional[dict]:
+    """从历史计划工具调用中重建计划，兼容旧会话和未落库状态。"""
+    session = await SessionRepository.get(user_id, session_id)
+    if not session:
         return None
-    
-    plan = extract_plan_from_state(state)
-    if not plan:
-        return None
-    
-    # 检查 Redis 中是否有用户编辑的计划内容
-    edited_plan_key = f"edited_plan:{session_id}"
-    try:
-        r = redis.from_url(settings.REDIS_URL, decode_responses=True)
-        edited_data_str = r.get(edited_plan_key)
-        r.close()
-        
-        if edited_data_str:
-            edited_data = json.loads(edited_data_str)
-            edited_subtask_names = edited_data.get("subtasks", [])
-            edited_name = edited_data.get("name", plan.get("name", ""))
-            
-            # 合并子任务：用户编辑的名称 + AI 更新的状态
-            original_subtasks = plan.get("subtasks", [])
-            merged_subtasks = []
-            
-            # 先处理用户编辑的子任务
-            for i, edited_name_item in enumerate(edited_subtask_names):
-                # 尝试匹配原始子任务获取状态
-                if i < len(original_subtasks):
-                    orig = original_subtasks[i]
-                    merged_subtasks.append(SubtaskSchema(
-                        name=edited_name_item,
-                        description=orig.get("description"),
-                        expected_outcome=orig.get("expected_outcome"),
-                        state=orig.get("state", "todo"),
-                    ))
-                else:
-                    # 新增的子任务
-                    merged_subtasks.append(SubtaskSchema(
-                        name=edited_name_item,
-                        state="todo",
-                    ))
-            
-            return PlanSchema(
-                name=edited_name,
-                description=plan.get("description"),
-                expected_outcome=plan.get("expected_outcome"),
-                state=plan.get("state", "todo"),
-                subtasks=merged_subtasks,
-            )
-    except Exception:
-        pass
-    
-    # 转换为响应格式（无编辑数据时使用原始内容）
+
+    messages = await SessionRepository.get_messages(session)
+    plan: Optional[dict] = None
+    for msg_record in messages:
+        tool_name, arguments = _parse_tool_arguments(msg_record.message)
+        if not tool_name:
+            continue
+
+        if tool_name in {"create_plan", "preview_plan"}:
+            raw_subtasks = arguments.get("subtasks") or []
+            if not isinstance(raw_subtasks, list):
+                raw_subtasks = []
+            plan = {
+                "name": str(arguments.get("name") or "分析计划"),
+                "description": arguments.get("description"),
+                "expected_outcome": arguments.get("expected_outcome"),
+                "state": "todo",
+                "subtasks": [_normalize_subtask(item) for item in raw_subtasks],
+            }
+            continue
+
+        if not plan:
+            continue
+
+        if tool_name == "update_subtask_state":
+            idx = arguments.get("subtask_idx")
+            state = arguments.get("state")
+            if isinstance(idx, int) and 0 <= idx < len(plan["subtasks"]) and state:
+                plan["subtasks"][idx]["state"] = str(state)
+                if str(state) == "in_progress":
+                    plan["state"] = "in_progress"
+        elif tool_name == "finish_subtask":
+            idx = arguments.get("subtask_idx")
+            if isinstance(idx, int) and 0 <= idx < len(plan["subtasks"]):
+                plan["subtasks"][idx]["state"] = "done"
+                outcome = arguments.get("subtask_outcome")
+                if outcome and not plan["subtasks"][idx].get("expected_outcome"):
+                    plan["subtasks"][idx]["expected_outcome"] = str(outcome)
+                next_idx = idx + 1
+                if next_idx < len(plan["subtasks"]):
+                    plan["subtasks"][next_idx]["state"] = "in_progress"
+                    plan["state"] = "in_progress"
+        elif tool_name == "finish_plan":
+            plan["state"] = str(arguments.get("state") or "done")
+            outcome = arguments.get("outcome")
+            if outcome:
+                plan["expected_outcome"] = str(outcome)
+
+    if plan and plan.get("subtasks") and all(st.get("state") == "done" for st in plan["subtasks"]):
+        plan["state"] = "done"
+    return plan
+
+
+def plan_to_schema(plan: dict) -> PlanSchema:
     subtasks = []
     for st in plan.get("subtasks", []):
         subtasks.append(SubtaskSchema(
@@ -159,7 +195,6 @@ async def get_plan(session_id: str, user: User = Depends(get_current_user)):
             expected_outcome=st.get("expected_outcome"),
             state=st.get("state", "todo"),
         ))
-    
     return PlanSchema(
         name=plan.get("name", ""),
         description=plan.get("description"),
@@ -167,6 +202,25 @@ async def get_plan(session_id: str, user: User = Depends(get_current_user)):
         state=plan.get("state", "todo"),
         subtasks=subtasks,
     )
+
+
+# ==================== API Endpoints ====================
+
+@router.get("/{session_id}", response_model=Optional[PlanSchema], summary="获取当前计划")
+async def get_plan(session_id: str, user: User = Depends(get_current_user)):
+    """获取指定会话的当前计划"""
+    user_id = str(user.id)
+    state = await StateRepository.get(user_id, session_id) or {}
+
+    plan = extract_plan_from_state(state)
+    if not plan:
+        plan = await reconstruct_plan_from_history(user_id, session_id)
+        if not plan:
+            return None
+        state.setdefault("plan_notebook", {})["current_plan"] = plan
+        await StateRepository.save(user_id, state, session_id)
+
+    return plan_to_schema(plan)
 
 
 @router.put("/{session_id}", response_model=PlanSchema, summary="更新计划")

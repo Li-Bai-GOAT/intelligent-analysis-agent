@@ -12,6 +12,7 @@
 - Celery 任务（如果有）
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -68,7 +69,11 @@ class SessionCleanupService:
 
                 agent_service = AgentService.get_instance()
                 if agent_service.sandbox_service:
-                    agent_service.sandbox_service.release(session_id)
+                    await asyncio.to_thread(
+                        agent_service.sandbox_service.release,
+                        session_id,
+                        str(binding.user_id),
+                    )
                 result["deleted"]["sandbox_runtime"] = 1
             except Exception as e:
                 result["errors"].append(f"释放沙箱容器失败: {e}")

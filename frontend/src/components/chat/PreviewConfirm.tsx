@@ -6,6 +6,7 @@ import { useSessionStore } from '../../stores/session'
 export function PreviewConfirm() {
   const pendingPreview = useSessionStore((s) => s.pendingPreview)
   const currentSession = useSessionStore((s) => s.currentSession)
+  const loadPlan = useSessionStore((s) => s.loadPlan)
   const clearPendingPreview = useSessionStore((s) => s.clearPendingPreview)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -82,12 +83,16 @@ export function PreviewConfirm() {
       } else if (isKuncode) {
         await Api.confirmKuncode(currentSession, pendingPreview.preview_id, 'confirm', input.trim() || String(pendingPreview.prompt || ''))
       } else if (isPlan) {
-        await Api.confirmPlanPreview(currentSession, pendingPreview.preview_id, 'confirm')
+        const subtasks = Array.isArray(pendingPreview.subtasks)
+          ? pendingPreview.subtasks.map((task) => typeof task === 'string' ? task : String((task as Record<string, unknown>).name || '')).filter(Boolean)
+          : []
+        await Api.confirmPlanPreview(currentSession, pendingPreview.preview_id, 'confirm', String(pendingPreview.name || ''), subtasks)
       } else if (isAutoContinue) {
         await Api.confirmAutoContinue(currentSession)
       }
       clearPendingPreview()
       setInput('')
+      void loadPlan(currentSession)
     } catch (error) {
       console.error('Preview confirm failed:', error)
       clearPendingPreview()
@@ -110,6 +115,7 @@ export function PreviewConfirm() {
       }
       clearPendingPreview()
       setInput('')
+      void loadPlan(currentSession)
     } finally {
       setLoading(false)
     }

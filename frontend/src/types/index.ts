@@ -39,6 +39,21 @@ export interface ToolCall {
 
 export type ToolExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
+export interface PlanSubtaskData {
+  name: string
+  description?: string
+  expected_outcome?: string
+  state?: string
+}
+
+export interface PlanData {
+  name: string
+  description?: string
+  expected_outcome?: string
+  state?: string
+  subtasks: PlanSubtaskData[]
+}
+
 export interface StreamData {
   type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'end' | 'error' | 'status' | 'plan' | 'kuncode_preview' | 'plan_preview' | 'user_input_request' | 'user_input_required' | 'context_update' | 'auto_continue' | 'interrupted' | 'step_complete'
   content?: string
@@ -49,6 +64,10 @@ export interface StreamData {
   call_id?: string
   data?: unknown
   input?: unknown
+  name?: string
+  description?: string
+  expected_outcome?: string
+  subtasks?: PlanSubtaskData[]
   context_info?: { usage_percent: number; estimated_tokens: number; max_tokens: number }
   event_id?: string
   task_id?: string

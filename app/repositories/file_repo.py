@@ -83,6 +83,11 @@ class SandboxBindingRepository:
     @staticmethod
     async def get_by_session(session_id: str) -> Optional[SandboxBinding]:
         return await SandboxBinding.filter(session_id=session_id).first()
+
+    @staticmethod
+    async def list_active() -> List[SandboxBinding]:
+        """返回仍声明占用运行时沙箱的绑定。"""
+        return await SandboxBinding.filter(is_active=True).all()
     
     @staticmethod
     async def update(

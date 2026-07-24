@@ -224,22 +224,23 @@ KUNCODE_IN_CODE_PATTERN = re.compile(
 )
 
 KUNCODE_FAILURE_PATTERNS = (
-    "api key is invalid",
-    "unauthorized",
-    "forbidden",
-    "authentication",
-    "[error]",
-    "error:",
-    "traceback",
-    "failed",
     "exited with code",
     "was stopped",
 )
 
 
 def _is_kuncode_failure(output: str) -> bool:
-    lowered = output.lower()
-    return any(pattern in lowered for pattern in KUNCODE_FAILURE_PATTERNS)
+    lowered = output.lower().strip()
+    if not lowered:
+        return True
+    last_line = next(
+        (line.strip() for line in reversed(lowered.splitlines()) if line.strip()),
+        "",
+    )
+    return (
+        last_line.startswith("[error]")
+        or any(pattern in last_line for pattern in KUNCODE_FAILURE_PATTERNS)
+    )
 
 
 def _append_kuncode_failure_hint(output: str) -> str:
@@ -270,6 +271,10 @@ def _normalize_kuncode_agent(agent: Optional[str]) -> Optional[str]:
     environment={
         # KunCode 模型配置
         "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "deepseek/deepseek-v4-flash"),
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         # MiniMax
         "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
         # DeepSeek
@@ -496,6 +501,10 @@ class DataAnalysisSandbox(Sandbox):
     environment={
         # KunCode 模型配置
         "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "deepseek/deepseek-v4-flash"),
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         # MiniMax
         "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
         # DeepSeek
