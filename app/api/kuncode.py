@@ -7,7 +7,7 @@ Kuncode 预览确认 API
 
 import json
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Depends, HTTPException
 import redis.asyncio as aioredis
@@ -242,7 +242,7 @@ class PlanConfirmRequest(BaseModel):
     """计划确认请求"""
     action: str  # confirm, cancel
     name: str = ""
-    subtasks: list[str] = []
+    subtasks: list[str] = Field(default_factory=list)
 
 
 @router.post("/{session_id}/plan/confirm/{preview_id}", summary="确认或取消计划预览")
@@ -508,6 +508,11 @@ def _get_plan_pending_key(session_id: str) -> str:
     return f"plan_pending:{session_id}"
 
 
+def _get_plan_confirm_key(session_id: str, preview_id: str) -> str:
+    """获取某一个计划预览独有的确认键。"""
+    return f"plan_confirm:{session_id}:{preview_id}"
+
+
 async def create_plan_preview(
     session_id: str,
     preview_id: str,
@@ -546,8 +551,7 @@ async def wait_for_plan_confirm(
     import time
     
     redis = await _get_redis()
-    # 使用会话级别的确认键，因为前端生成的 preview_id 可能与后端不同
-    confirm_key = f"plan_confirm:{session_id}"
+    confirm_key = _get_plan_confirm_key(session_id, preview_id)
     interrupt_key = f"agent_interrupt:{session_id}"
     preview_key = _get_plan_preview_key(session_id, preview_id)
     pending_key = _get_plan_pending_key(session_id)
@@ -567,9 +571,12 @@ async def wait_for_plan_confirm(
             result = await redis.get(confirm_key)
             if result:
                 data = json.loads(result)
-                # 清理确认键
                 await redis.delete(confirm_key)
-                return data
+                if (
+                    data.get("preview_id") == preview_id
+                    and data.get("action") in {"confirm", "cancel"}
+                ):
+                    return data
             
             # 检查是否超时（基于 Redis 中的 created_at，支持重置）
             preview_data = await redis.get(preview_key)
@@ -580,16 +587,15 @@ async def wait_for_plan_confirm(
                     timeout_seconds = pdata.get("timeout_seconds", timeout)
                     elapsed = time.time() - created_at
                     if elapsed >= timeout_seconds:
-                        # 超时后清理 pending 状态
+                        # 计划必须由用户显式确认；超时按取消处理，不能自动执行。
                         await redis.delete(pending_key)
-                        # 更新预览状态
-                        pdata["status"] = "auto_confirmed"
+                        pdata["status"] = "expired"
                         await redis.set(preview_key, json.dumps(pdata), ex=3600)
-                        # 返回当前保存的数据（可能已被用户编辑）
                         return {
-                            "action": "auto_confirm",
-                            "name": pdata.get("name", ""),
-                            "subtasks": pdata.get("subtasks", []),
+                            "action": "cancel",
+                            "name": "",
+                            "subtasks": [],
+                            "timeout": True,
                         }
                 except Exception as e:
                     import logging
@@ -614,27 +620,37 @@ async def confirm_plan_preview(
     redis = await _get_redis()
     try:
         pending_key = _get_plan_pending_key(session_id)
-        confirm_key = f"plan_confirm:{session_id}"
+        confirm_key = _get_plan_confirm_key(session_id, preview_id)
 
         preview_key = _get_plan_preview_key(session_id, preview_id)
+        pending_preview_id = await redis.get(pending_key)
+        if isinstance(pending_preview_id, bytes):
+            pending_preview_id = pending_preview_id.decode()
+        if pending_preview_id != preview_id:
+            raise HTTPException(status_code=409, detail="该计划预览已失效或不是当前待确认计划")
+
         preview_data = await redis.get(preview_key)
-        current_preview: dict = {}
-        if preview_data:
-            try:
-                parsed = json.loads(preview_data)
-                if isinstance(parsed, dict):
-                    current_preview = parsed
-            except Exception:
-                current_preview = {}
+        if not preview_data:
+            raise HTTPException(status_code=404, detail="计划预览不存在或已过期")
+
+        try:
+            parsed = json.loads(preview_data)
+            current_preview = parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="计划预览数据无效") from exc
+
+        if current_preview.get("status") != "pending":
+            raise HTTPException(status_code=409, detail="该计划预览已被处理")
+        if action not in {"confirm", "cancel"}:
+            raise HTTPException(status_code=400, detail="无效的 action")
 
         confirm_data = {
             "action": action,
             "name": name or current_preview.get("name", ""),
-            "subtasks": subtasks or current_preview.get("subtasks", []),
+            "subtasks": subtasks if subtasks is not None else current_preview.get("subtasks", []),
             "preview_id": preview_id,
         }
         await redis.set(confirm_key, json.dumps(confirm_data), ex=300)
-        await redis.set(f"plan_confirmed:{session_id}", json.dumps(confirm_data), ex=300)
 
         # 清理 pending 仅保留确认结果，避免前端重连时误以为还有未处理预览
         await redis.delete(pending_key)

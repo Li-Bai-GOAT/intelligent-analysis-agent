@@ -299,6 +299,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           },
         )
         set({ currentEventSource: eventSource })
+        startPendingPreviewPolling(sessionId, get, get().loadPendingPreview)
       } else {
         messages = finalizeTurnMessages(messages, null, 'failed', '[ERROR] 执行记录不完整，任务已结束。')
         set({ messages })
@@ -399,6 +400,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         },
       )
       set({ currentEventSource: eventSource })
+      startPendingPreviewPolling(state.currentSession, get, get().loadPendingPreview)
       return true
     } catch (err) {
       console.error('Send error:', err)
@@ -591,6 +593,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
         break
       }
+      case 'plan_confirmed':
+      case 'kuncode_confirmed':
+      case 'user_input_received': {
+        const current = get()
+        if (
+          !current.pendingPreview
+          || !data.preview_id
+          || current.pendingPreview.preview_id === data.preview_id
+        ) {
+          set({ pendingPreview: null })
+          if (current.isStreaming && current.currentSession) {
+            startPendingPreviewPolling(
+              current.currentSession,
+              get,
+              get().loadPendingPreview,
+            )
+          }
+        }
+        break
+      }
       case 'status':
         break
       case 'end':
@@ -644,5 +666,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  clearPendingPreview: () => set({ pendingPreview: null }),
+  clearPendingPreview: () => {
+    set({ pendingPreview: null })
+    const current = get()
+    if (current.isStreaming && current.currentSession) {
+      startPendingPreviewPolling(
+        current.currentSession,
+        get,
+        get().loadPendingPreview,
+      )
+    }
+  },
 }))

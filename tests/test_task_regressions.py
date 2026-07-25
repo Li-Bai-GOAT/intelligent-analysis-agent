@@ -1,4 +1,6 @@
 import asyncio
+import inspect
+import queue
 import tarfile
 import json
 import unittest
@@ -9,6 +11,12 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi import HTTPException
 
 from app.api.conversation import ChatRequest, _require_session_owner
+from app.api.kuncode import (
+    confirm_plan_preview,
+    create_plan_preview,
+    wait_for_plan_confirm,
+)
+from app.api.plans import update_plan_in_state
 from app.api.files import _is_within_workspace
 from app.repositories.session_repo import SessionRepository
 from app.services.agent_service import (
@@ -19,7 +27,11 @@ from app.services.agent_service import (
     _extract_persisted_tool_results,
     _extract_workspace_files,
     _tool_output_failed,
+    ConfirmedPlanNotebook,
+    PlanConfirmationGate,
+    create_preview_plan_tool,
 )
+from agentscope.plan import SubTask
 from data_analysis_sandbox import _is_kuncode_failure
 from app.services.sandbox_injection import SandboxInjectionService
 from app.services.sandbox_cleanup_service import SandboxCleanupService
@@ -43,6 +55,9 @@ class FakeRedis:
 
     async def delete(self, key):
         self.values.pop(key, None)
+
+    async def aclose(self):
+        return None
 
 
 class FakeStreamRedis(FakeRedis):
@@ -75,6 +90,248 @@ class FakeSandboxWithFiles:
 
 
 class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plan_confirmation_is_scoped_to_exact_preview(self):
+        redis = FakeRedis()
+        with patch("app.api.kuncode._get_redis", new=AsyncMock(return_value=redis)):
+            await create_plan_preview(
+                "session-1",
+                "plan-current",
+                "计划",
+                ["步骤一"],
+            )
+
+            with self.assertRaises(HTTPException) as context:
+                await confirm_plan_preview(
+                    "session-1",
+                    "plan-stale",
+                    "cancel",
+                )
+            self.assertEqual(context.exception.status_code, 409)
+
+            await confirm_plan_preview(
+                "session-1",
+                "plan-current",
+                "cancel",
+            )
+            result = await wait_for_plan_confirm(
+                "session-1",
+                "plan-current",
+            )
+
+        self.assertEqual(result["action"], "cancel")
+        self.assertEqual(result["preview_id"], "plan-current")
+        self.assertNotIn("plan_confirm:session-1", redis.values)
+
+    async def test_plan_confirmation_timeout_cancels_instead_of_auto_confirming(self):
+        redis = FakeRedis()
+        with patch("app.api.kuncode._get_redis", new=AsyncMock(return_value=redis)):
+            await create_plan_preview(
+                "session-1",
+                "plan-timeout",
+                "计划",
+                ["步骤一"],
+                timeout_seconds=0,
+            )
+            result = await wait_for_plan_confirm(
+                "session-1",
+                "plan-timeout",
+            )
+
+        self.assertEqual(result["action"], "cancel")
+        self.assertTrue(result["timeout"])
+
+    async def test_plan_preview_tool_is_async_and_cancel_revokes_creation(self):
+        event_queue = queue.Queue()
+        gate = PlanConfirmationGate()
+        wait_result = {
+            "action": "cancel",
+            "name": "",
+            "subtasks": [],
+        }
+        with (
+            patch(
+                "app.api.kuncode.create_plan_preview",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.api.kuncode.wait_for_plan_confirm",
+                new=AsyncMock(return_value=wait_result),
+            ),
+        ):
+            tool = create_preview_plan_tool(
+                "session-1",
+                event_queue,
+                gate,
+            )
+            self.assertTrue(inspect.iscoroutinefunction(tool))
+            response = await tool("计划", ["步骤一"])
+
+        self.assertTrue(response.metadata["cancelled"])
+        events = []
+        while not event_queue.empty():
+            events.append(event_queue.get_nowait())
+        self.assertEqual(events[-1]["action"], "cancel")
+        self.assertTrue(events[-1]["cancelled"])
+
+        notebook = ConfirmedPlanNotebook(gate, max_subtasks=10)
+        blocked = await notebook.create_plan(
+            name="计划",
+            description="描述",
+            expected_outcome="结果",
+            subtasks=[
+                SubTask(
+                    name="步骤一",
+                    description="执行步骤一",
+                    expected_outcome="完成步骤一",
+                ),
+            ],
+        )
+        self.assertTrue(blocked.metadata["confirmation_required"])
+        self.assertIsNone(notebook.current_plan)
+
+    async def test_confirmed_preview_accepts_concise_create_plan_task_names(self):
+        gate = PlanConfirmationGate()
+        gate.approve(
+            "PACS操作说明PPT制作",
+            [
+                "1. 内容提炼与结构化：从 PDF 中提取核心内容",
+                "2. PPT制作与输出：创建并保存演示文稿",
+            ],
+        )
+        notebook = ConfirmedPlanNotebook(gate, max_subtasks=10)
+
+        response = await notebook.create_plan(
+            name="PACS操作说明PPT制作",
+            description="制作说明文档",
+            expected_outcome="PPT 文件",
+            subtasks=[
+                SubTask(
+                    name="内容提炼与结构化",
+                    description="从 PDF 中提取核心内容",
+                    expected_outcome="PPT 大纲",
+                ),
+                SubTask(
+                    name="PPT制作与输出",
+                    description="创建并保存演示文稿",
+                    expected_outcome="PPT 文件",
+                ),
+            ],
+        )
+
+        self.assertNotIn("confirmation_required", response.metadata or {})
+        self.assertIsNotNone(notebook.current_plan)
+
+    async def test_plan_confirmation_accepts_preview_titles_with_detail_or_context(self):
+        detailed_gate = PlanConfirmationGate()
+        detailed_gate.approve(
+            "房产模拟数据生成与可视化看板",
+            [
+                "1. 生成200条房产模拟数据 - 包含区域、户型、面积和价格字段",
+                "2. 制作可视化HTML网页 - 包含图表和交互看板",
+            ],
+        )
+
+        self.assertTrue(
+            detailed_gate.consume(
+                "房产模拟数据生成与可视化看板",
+                ["生成200条房产模拟数据", "制作可视化HTML网页"],
+            )
+        )
+
+        contextual_gate = PlanConfirmationGate()
+        contextual_gate.approve(
+            "房产模拟数据生成与可视化看板",
+            [
+                "生成200条房产模拟数据",
+                "基于模拟数据制作可视化HTML网页",
+            ],
+        )
+
+        self.assertTrue(
+            contextual_gate.consume(
+                "房产模拟数据生成与可视化看板",
+                ["生成200条房产模拟数据", "制作可视化HTML网页"],
+            )
+        )
+
+    async def test_plan_confirmation_rejects_unapproved_subtask(self):
+        gate = PlanConfirmationGate()
+        gate.approve("计划", ["生成模拟数据", "制作可视化网页"])
+
+        self.assertFalse(gate.consume("计划", ["生成模拟数据", "删除原始数据"]))
+
+    async def test_plan_confirmation_accepts_compact_title_with_same_action_and_artifact(self):
+        gate = PlanConfirmationGate()
+        gate.approve(
+            "暑假学习计划文档",
+            [
+                "设计并生成不同高中生暑假学习计划的Word文档",
+                "将Word文档转换为PDF文件",
+            ],
+        )
+
+        self.assertTrue(
+            gate.consume(
+                "暑假学习计划文档",
+                ["设计并生成Word文档", "转换为PDF文件"],
+            )
+        )
+
+    async def test_partial_persisted_state_is_loaded_non_strictly(self):
+        agent = Mock()
+        agent.state_dict.return_value = {
+            "memory": {"messages": []},
+            "plan_notebook": {
+                "storage": {"plans": {}},
+                "current_plan": None,
+            },
+        }
+        partial_state = {"plan_notebook": {"current_plan": {"name": "计划"}}}
+
+        AgentService._restore_agent_state(agent, partial_state)
+
+        agent.load_state_dict.assert_called_once_with(
+            {
+                "memory": {"messages": []},
+                "plan_notebook": {
+                    "storage": {"plans": {}},
+                    "current_plan": {"name": "计划"},
+                },
+            },
+            strict=False,
+        )
+
+    async def test_finish_plan_retains_terminal_snapshot_for_persistence(self):
+        gate = PlanConfirmationGate()
+        gate.approve("计划", ["步骤"])
+        notebook = ConfirmedPlanNotebook(gate, max_subtasks=10)
+        await notebook.create_plan(
+            name="计划",
+            description="描述",
+            expected_outcome="结果",
+            subtasks=[
+                SubTask(
+                    name="步骤",
+                    description="执行步骤",
+                    expected_outcome="步骤完成",
+                ),
+            ],
+        )
+
+        await notebook.finish_plan("done", "结果已生成")
+
+        self.assertIsNone(notebook.current_plan)
+        self.assertIsNotNone(notebook.last_finished_plan)
+        self.assertEqual(notebook.last_finished_plan.state, "done")
+        self.assertEqual(notebook.last_finished_plan.outcome, "结果已生成")
+
+    async def test_plan_state_update_is_persisted(self):
+        state = {"plan_notebook": {"current_plan": {"name": "计划", "state": "todo"}}}
+
+        updated = update_plan_in_state(state, {"state": "done"})
+
+        self.assertEqual(updated["plan_notebook"]["current_plan"]["state"], "done")
+
     async def test_kuncode_completion_reports_workspace_files(self):
         files = _extract_workspace_files(
             "Created /workspace/reports/summary.html, workspace/data/result.csv, "

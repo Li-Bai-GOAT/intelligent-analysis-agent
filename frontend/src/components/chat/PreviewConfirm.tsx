@@ -10,6 +10,7 @@ export function PreviewConfirm() {
   const clearPendingPreview = useSessionStore((s) => s.clearPendingPreview)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -18,6 +19,7 @@ export function PreviewConfirm() {
       } else {
         setInput('')
       }
+      setError('')
     }, 0)
     return () => window.clearTimeout(timer)
   }, [pendingPreview?.preview_id, pendingPreview?.type, pendingPreview?.prompt])
@@ -77,6 +79,7 @@ export function PreviewConfirm() {
     if (isUserInput && !input.trim()) return
 
     setLoading(true)
+    setError('')
     try {
       if (isUserInput) {
         await Api.sendKuncodeInput(currentSession, pendingPreview.preview_id, input.trim())
@@ -95,8 +98,7 @@ export function PreviewConfirm() {
       void loadPlan(currentSession)
     } catch (error) {
       console.error('Preview confirm failed:', error)
-      clearPendingPreview()
-      setInput('')
+      setError(error instanceof Error ? error.message : '确认失败，请重试')
     } finally {
       setLoading(false)
     }
@@ -105,17 +107,21 @@ export function PreviewConfirm() {
   const handleCancel = async () => {
     if (loading) return
     setLoading(true)
+    setError('')
     try {
       if (isKuncode || isUserInput) {
-        await Api.confirmKuncode(currentSession, pendingPreview.preview_id, 'cancel').catch(() => undefined)
+        await Api.confirmKuncode(currentSession, pendingPreview.preview_id, 'cancel')
       } else if (isPlan) {
-        await Api.cancelPlanPreview(currentSession, pendingPreview.preview_id).catch(() => undefined)
+        await Api.cancelPlanPreview(currentSession, pendingPreview.preview_id)
       } else if (isAutoContinue) {
-        await Api.cancelAutoContinue(currentSession).catch(() => undefined)
+        await Api.cancelAutoContinue(currentSession)
       }
       clearPendingPreview()
       setInput('')
       void loadPlan(currentSession)
+    } catch (error) {
+      console.error('Preview cancel failed:', error)
+      setError(error instanceof Error ? error.message : '取消失败，请重试')
     } finally {
       setLoading(false)
     }
@@ -148,6 +154,7 @@ export function PreviewConfirm() {
 
         <div className="space-y-3 px-4 py-3">
           {meta.message && <p className="text-sm leading-relaxed text-text-secondary">{meta.message}</p>}
+          {error && <p className="text-xs text-error">{error}</p>}
 
           {meta.showInput && (
             meta.multiline ? (

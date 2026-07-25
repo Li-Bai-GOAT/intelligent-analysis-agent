@@ -55,7 +55,7 @@ export interface PlanData {
 }
 
 export interface StreamData {
-  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'end' | 'error' | 'status' | 'plan' | 'kuncode_preview' | 'plan_preview' | 'user_input_request' | 'user_input_required' | 'context_update' | 'auto_continue' | 'interrupted' | 'step_complete'
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'end' | 'error' | 'status' | 'plan' | 'kuncode_preview' | 'plan_preview' | 'plan_confirmed' | 'kuncode_confirmed' | 'user_input_request' | 'user_input_required' | 'user_input_received' | 'context_update' | 'auto_continue' | 'interrupted' | 'step_complete'
   content?: string
   tool_id?: string
   tool_name?: string
@@ -72,6 +72,8 @@ export interface StreamData {
   event_id?: string
   task_id?: string
   session_id?: string
+  preview_id?: string
+  request_id?: string
   phase?: 'started' | 'progress' | 'completed' | 'failed' | 'cancelled'
   execution_status?: 'running' | 'completed' | 'failed' | 'cancelled'
   generated_files?: string[]

@@ -280,7 +280,7 @@ import redis.asyncio as aioredis
 
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
-from agentscope.plan import PlanNotebook
+from agentscope.plan import PlanNotebook, SubTask
 from agentscope.tool import Toolkit, ToolResponse
 from agentscope.pipeline import stream_printing_messages
 
@@ -362,19 +362,172 @@ def streaming_sandbox_tool_adapter(func):
     return wrapper
 
 
-def _run_async(coro):
-    """安全运行异步协程，处理嵌套事件循环情况"""
-    import asyncio
-    try:
-        asyncio.get_running_loop()
-        # 已在事件循环中，使用 nest_asyncio 或创建新线程
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, coro)
-            return future.result()
-    except RuntimeError:
-        # 没有运行中的事件循环，直接运行
-        return asyncio.run(coro)
+class PlanConfirmationGate:
+    """只允许一次与用户已确认预览相符的 ``create_plan`` 调用。"""
+
+    def __init__(self) -> None:
+        self._approved: tuple[str, tuple[str, ...]] | None = None
+        self._cancelled = False
+
+    @staticmethod
+    def _normalize_item(value: str) -> str:
+        """Normalize display task text before comparing it with tool input.
+
+        ``preview_plan`` deliberately receives human-readable task lines,
+        while ``create_plan`` receives concise subtask names plus separate
+        descriptions.  The old byte-for-byte comparison treated those two
+        representations as different plans and rejected a valid approval.
+        """
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        text = re.sub(r"^\s*\d+\s*[.、:：)）-]\s*", "", text)
+        return text.casefold()
+
+    @classmethod
+    def _subtask_matches(cls, approved: str, requested: str) -> bool:
+        approved_text = cls._normalize_item(approved)
+        requested_text = cls._normalize_item(requested)
+        if approved_text == requested_text:
+            return True
+
+        if not requested_text:
+            return False
+
+        # A preview may be a title plus detail, separated by a colon or a
+        # spaced dash.  create_plan receives the title only.
+        approved_title = re.split(r"\s+[-–—]\s+|[：:]", approved_text, maxsplit=1)[0]
+        if approved_title == requested_text:
+            return True
+
+        # Some valid previews start with context (for example, "基于模拟数据")
+        # and then end with the concise task title used by create_plan.  A
+        # suffix comparison still requires the whole requested title to be a
+        # continuous, meaningful phrase from the user-approved preview; it
+        # does not allow a model to substitute a different task.
+        if len(requested_text) >= 4 and approved_text.endswith(requested_text):
+            return True
+
+        # Preserve support for a concise prefix followed by user-facing
+        # details, including previews without spaces before the separator.
+        if (
+            approved_text.startswith(f"{requested_text}:")
+            or approved_text.startswith(f"{requested_text}：")
+        ):
+            return True
+
+        # The model can keep the approved action and deliverable while moving
+        # scope details to ``description`` (for example, "设计并生成…Word
+        # 文档" -> "设计并生成Word文档").  Accept this only when the shared
+        # prefix and suffix together cover almost all of the requested title.
+        prefix_length = 0
+        for approved_char, requested_char in zip(approved_text, requested_text):
+            if approved_char != requested_char:
+                break
+            prefix_length += 1
+
+        suffix_length = 0
+        for approved_char, requested_char in zip(
+            reversed(approved_text),
+            reversed(requested_text),
+        ):
+            if approved_char != requested_char:
+                break
+            suffix_length += 1
+
+        shared_length = min(len(requested_text), prefix_length + suffix_length)
+        return bool(
+            len(requested_text) >= 8
+            and prefix_length >= 4
+            and suffix_length >= 4
+            and shared_length / len(requested_text) >= 0.9
+        )
+
+    def begin_preview(self) -> None:
+        self._approved = None
+        self._cancelled = False
+
+    def approve(self, name: str, subtasks: list[str]) -> None:
+        self._approved = (
+            self._normalize_item(name),
+            tuple(self._normalize_item(subtask) for subtask in subtasks),
+        )
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._approved = None
+        self._cancelled = True
+
+    def consume(self, name: str, subtasks: list[str]) -> bool:
+        if self._cancelled or self._approved is None:
+            return False
+        approved_name, approved_subtasks = self._approved
+        requested_name = self._normalize_item(name)
+        if (
+            approved_name != requested_name
+            or len(approved_subtasks) != len(subtasks)
+            or not all(
+                self._subtask_matches(approved, requested)
+                for approved, requested in zip(approved_subtasks, subtasks)
+            )
+        ):
+            return False
+        self._approved = None
+        return True
+
+
+class ConfirmedPlanNotebook(PlanNotebook):
+    """强制计划创建先经过当前会话的人工确认。"""
+
+    def __init__(self, confirmation_gate: PlanConfirmationGate, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._confirmation_gate = confirmation_gate
+        self.last_finished_plan = None
+
+    async def create_plan(
+        self,
+        name: str,
+        description: str,
+        expected_outcome: str,
+        subtasks: list[SubTask],
+    ) -> ToolResponse:
+        """Create the exact plan most recently confirmed by the user."""
+        subtask_names = [
+            str(
+                getattr(subtask, "name", "")
+                or (subtask.get("name", "") if isinstance(subtask, dict) else "")
+            )
+            for subtask in subtasks
+        ]
+        if not self._confirmation_gate.consume(name, subtask_names):
+            return ToolResponse(
+                content=[{
+                    "type": "text",
+                    "text": (
+                        "Error: This plan was not confirmed by the user. "
+                        "Call preview_plan and wait for confirmation before create_plan."
+                    ),
+                }],
+                metadata={"success": False, "confirmation_required": True},
+            )
+        self.last_finished_plan = None
+        return await super().create_plan(
+            name=name,
+            description=description,
+            expected_outcome=expected_outcome,
+            subtasks=subtasks,
+        )
+
+    async def finish_plan(self, state: str, outcome: str) -> ToolResponse:
+        """Retain the terminal plan snapshot while AgentScope clears it.
+
+        AgentScope intentionally sets ``current_plan`` to ``None`` before it
+        runs change hooks.  The application hook therefore used to miss the
+        final ``done`` transition and leave the persisted right-hand panel in
+        ``in_progress`` forever.
+        """
+        if self.current_plan is not None:
+            self.current_plan.finish(state, outcome)
+            self.last_finished_plan = self.current_plan.model_copy(deep=True)
+        return await super().finish_plan(state, outcome)
 
 
 def create_ask_user_tool(session_id: str, hitl_queue):
@@ -384,7 +537,7 @@ def create_ask_user_tool(session_id: str, hitl_queue):
     """
     from app.api.kuncode import wait_for_kuncode_confirm, create_kuncode_preview
     
-    def ask_user() -> ToolResponse:
+    async def ask_user() -> ToolResponse:
         """等待用户输入。当你已经向用户提出问题后，调用此工具获取用户的回答。
         
         注意：在调用此工具之前，你应该先用自然语言输出你的问题，然后再调用此工具等待用户回答。
@@ -393,14 +546,14 @@ def create_ask_user_tool(session_id: str, hitl_queue):
         request_id = f"ask_{str(uuid.uuid4())[:8]}"
         
         # 创建 Redis 预览记录（用于确认 API）
-        _run_async(create_kuncode_preview(
+        await create_kuncode_preview(
             session_id=session_id,
             preview_id=request_id,
             prompt="",  # ask_user 没有初始 prompt
             agent=None,
             model=None,
             timeout_seconds=180,
-        ))
+        )
         
         # 通过队列通知前端需要用户输入
         hitl_queue.put({
@@ -411,7 +564,11 @@ def create_ask_user_tool(session_id: str, hitl_queue):
         })
         
         # 等待用户输入（3分钟超时后自动继续）
-        result = _run_async(wait_for_kuncode_confirm(session_id, request_id, timeout=180))
+        result = await wait_for_kuncode_confirm(
+            session_id,
+            request_id,
+            timeout=180,
+        )
         
         if result.get("action") == "cancel":
             return ToolResponse(
@@ -448,7 +605,7 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
     """
     from app.api.kuncode import create_kuncode_preview, wait_for_kuncode_confirm
     
-    def kuncode_prd_update(prompt: str, agent: str) -> ToolResponse:
+    async def kuncode_prd_update(prompt: str, agent: str) -> ToolResponse:
         """让用户预览和编辑 KunCode 任务的 PRD (需求描述)
         
         此工具会将 AI 生成的 prompt 展示给用户，用户可以修改后确认。
@@ -467,14 +624,14 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
         preview_id = str(uuid.uuid4())[:8]
         
         # 创建预览请求并通知前端
-        _run_async(create_kuncode_preview(
+        await create_kuncode_preview(
             session_id=session_id,
             preview_id=preview_id,
             prompt=prompt,
             agent=agent,
             model=None,
             timeout_seconds=timeout_seconds,
-        ))
+        )
         
         # 通过队列通知前端显示预览
         hitl_queue.put({
@@ -487,7 +644,11 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
         })
         
         # 等待用户确认（阻塞，3分钟超时后自动继续）
-        result = _run_async(wait_for_kuncode_confirm(session_id, preview_id, timeout=timeout_seconds))
+        result = await wait_for_kuncode_confirm(
+            session_id,
+            preview_id,
+            timeout=timeout_seconds,
+        )
         
         if result.get("action") == "cancel":
             return ToolResponse(
@@ -524,14 +685,18 @@ def create_kuncode_prd_update_tool(session_id: str, hitl_queue):
     return kuncode_prd_update
 
 
-def create_preview_plan_tool(session_id: str, hitl_queue):
+def create_preview_plan_tool(
+    session_id: str,
+    hitl_queue,
+    confirmation_gate: PlanConfirmationGate,
+):
     """创建计划预览工具
     
     让用户预览和编辑 AI 生成的计划，返回编辑后的计划供后续 create_plan 使用
     """
     from app.api.kuncode import create_plan_preview, wait_for_plan_confirm
     
-    def preview_plan(name: str, subtasks: list[str]) -> ToolResponse:
+    async def preview_plan(name: str, subtasks: list[str]) -> ToolResponse:
         """让用户预览和编辑计划
         
         此工具会将 AI 生成的计划展示给用户，用户可以修改计划名称和子任务后确认。
@@ -545,6 +710,8 @@ def create_preview_plan_tool(session_id: str, hitl_queue):
             用户确认后的计划（JSON格式，包含 name 和 subtasks）
         """
         
+        confirmation_gate.begin_preview()
+
         # 生成预览 ID
         preview_id = f"plan_{str(uuid.uuid4())[:8]}"
         
@@ -552,13 +719,13 @@ def create_preview_plan_tool(session_id: str, hitl_queue):
         subtasks_data = [{"name": s, "state": "todo"} for s in subtasks]
         
         # 创建计划预览请求
-        _run_async(create_plan_preview(
+        await create_plan_preview(
             session_id=session_id,
             preview_id=preview_id,
             name=name,
             subtasks=subtasks,
             timeout_seconds=180,
-        ))
+        )
         
         # 通过队列通知前端显示计划预览
         hitl_queue.put({
@@ -571,14 +738,21 @@ def create_preview_plan_tool(session_id: str, hitl_queue):
         })
         
         # 等待用户确认（阻塞，3分钟超时后自动继续）
-        result = _run_async(wait_for_plan_confirm(session_id, preview_id, timeout=180))
-        
+        result = await wait_for_plan_confirm(
+            session_id,
+            preview_id,
+            timeout=180,
+        )
+
         if result.get("action") == "cancel":
+            confirmation_gate.cancel()
             # 通知前端取消
             hitl_queue.put({
                 "type": "plan_confirmed",
                 "preview_id": preview_id,
                 "auto_confirm": False,
+                "action": "cancel",
+                "cancelled": True,
             })
             return ToolResponse(
                 content=[{"type": "text", "text": "[用户取消了计划]"}],
@@ -589,12 +763,15 @@ def create_preview_plan_tool(session_id: str, hitl_queue):
         is_auto_confirm = result.get("action") == "auto_confirm"
         edited_name = result.get("name") or name
         edited_subtasks = result.get("subtasks") or subtasks
+        confirmation_gate.approve(edited_name, edited_subtasks)
         
         # 通知前端已确认
         hitl_queue.put({
             "type": "plan_confirmed",
             "preview_id": preview_id,
             "auto_confirm": is_auto_confirm,
+            "action": "confirm",
+            "cancelled": False,
         })
         
         # 构建返回内容
@@ -710,6 +887,35 @@ class AgentService:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    @staticmethod
+    def _merge_persisted_state(default_state: dict, persisted_state: dict) -> dict:
+        """Overlay a persisted state on the current AgentScope state shape."""
+        merged = dict(default_state)
+        for key, default_value in default_state.items():
+            if key not in persisted_state:
+                continue
+            persisted_value = persisted_state[key]
+            if isinstance(default_value, dict) and isinstance(persisted_value, dict):
+                merged[key] = AgentService._merge_persisted_state(
+                    default_value,
+                    persisted_value,
+                )
+            else:
+                merged[key] = persisted_value
+        return merged
+
+    @classmethod
+    def _restore_agent_state(cls, agent, state: Optional[dict]) -> None:
+        """Restore persisted state without breaking on older partial records.
+
+        Plan updates can be persisted before an AgentScope turn reaches its
+        final full-state save.  Such a record legitimately lacks modules such
+        as ``memory``; strict loading would make the next user message fail.
+        """
+        if isinstance(state, dict) and state:
+            complete_state = cls._merge_persisted_state(agent.state_dict(), state)
+            agent.load_state_dict(complete_state, strict=False)
     
     async def start(self) -> None:
         """启动服务"""
@@ -991,18 +1197,29 @@ class AgentService:
         
         # run_kuncode: 始终注册流式版本
         toolkit.register_tool_function(streaming_sandbox_tool_adapter(sandbox.run_kuncode))
-        
+
+        confirmation_gate = PlanConfirmationGate()
+
         # 如果提供了 hitl_queue，注册 HITL 工具
         if hitl_queue:
             # kuncode_prd_update: 让用户预览和编辑 prompt，返回后 AI 调用 run_kuncode
             toolkit.register_tool_function(create_kuncode_prd_update_tool(session_id, hitl_queue))
             # preview_plan: 让用户预览和编辑计划，返回后 AI 调用 create_plan
-            toolkit.register_tool_function(create_preview_plan_tool(session_id, hitl_queue))
+            toolkit.register_tool_function(
+                create_preview_plan_tool(
+                    session_id,
+                    hitl_queue,
+                    confirmation_gate,
+                ),
+            )
             # ask_user: AI 主动请求用户输入
             toolkit.register_tool_function(create_ask_user_tool(session_id, hitl_queue))
         
         # 创建计划笔记本并注册钩子
-        plan_notebook = PlanNotebook(max_subtasks=10)
+        plan_notebook = ConfirmedPlanNotebook(
+            confirmation_gate=confirmation_gate,
+            max_subtasks=10,
+        )
         
         # 热加载系统提示词 + 可用智能体列表 + 历史摘要
         base_prompt = await _load_system_prompt()
@@ -1020,6 +1237,7 @@ class AgentService:
             logger.info(f"已注入历史摘要到系统提示词，跳过 {skip_count} 条已覆盖消息")
         
         latest_plan_snapshot: dict[str, Any] | None = None
+        plan_snapshot_ref: dict[str, dict[str, Any] | None] = {"value": None}
 
         if plan_callback:
             def _normalize_plan_subtask(subtask) -> dict:
@@ -1043,10 +1261,18 @@ class AgentService:
                 """计划变更钩子 - 同步更新前端与持久化状态"""
                 nonlocal latest_plan_snapshot
                 if plan is None:
-                    return
+                    # AgentScope clears ``current_plan`` before invoking this
+                    # hook on finish.  Our notebook preserves the completed
+                    # object so the terminal state reaches both the stream
+                    # and PostgreSQL instead of leaving a stale in-progress
+                    # snapshot in the Plan panel.
+                    plan = getattr(notebook, "last_finished_plan", None)
+                    if plan is None:
+                        return
 
                 plan_data = _normalize_plan(plan)
                 latest_plan_snapshot = plan_data
+                plan_snapshot_ref["value"] = plan_data
 
                 # 直接更新计划显示
                 plan_callback(
@@ -1111,6 +1337,10 @@ class AgentService:
         )
         
         agent.set_console_output_enabled(enabled=False)
+        # ``chat`` needs the final snapshot after ``finish_plan`` has cleared
+        # AgentScope's current_plan. Keep a mutable reference rather than a
+        # local variable that is out of scope in the chat coroutine.
+        agent._dataagent_plan_snapshot_ref = plan_snapshot_ref
         return agent    
 
     async def _direct_run_kuncode(
@@ -1354,8 +1584,7 @@ class AgentService:
             
             # 恢复状态
             state = await self.state_service.export_state(user_id, session_id)
-            if state:
-                agent.load_state_dict(state)
+            self._restore_agent_state(agent, state)
             
             # 修复未配对的 plugin_call（用户可能在上次中断后直接发送新消息）
             await self._repair_unpaired_plugin_calls(user_id, session_id)
@@ -1421,6 +1650,7 @@ class AgentService:
             # 创建生产者任务并绑定到中断监控器
             producer_task = asyncio.create_task(stream_producer())
             interrupt_monitor.bind_task(producer_task)
+            turn_cancelled = False
             
             # 流式输出去重：记录已发送的内容，避免重复发送
             last_thinking_content = ""
@@ -1454,8 +1684,31 @@ class AgentService:
                         try:
                             event = event_queue.get_nowait()
                             yield event
+                            if event.get("type") == "plan_confirmed" and event.get("cancelled"):
+                                turn_cancelled = True
                         except queue.Empty:
                             break
+
+                    if turn_cancelled:
+                        if hasattr(agent, "interrupt"):
+                            await agent.interrupt()
+                        if pending_tool_calls:
+                            await self._add_interrupted_tool_results(
+                                user_id,
+                                session_id,
+                                pending_tool_calls,
+                            )
+                            for terminal_event in _build_terminal_tool_results(
+                                pending_tool_calls,
+                                status="cancelled",
+                            ):
+                                yield terminal_event
+                            pending_tool_calls.clear()
+                        yield {
+                            "type": "interrupted",
+                            "content": "用户取消了计划，已停止执行",
+                        }
+                        break
                     
                     # 从流式队列获取消息（带超时，以便定期检查中断）
                     try:
@@ -1600,6 +1853,20 @@ class AgentService:
             pending_tool_calls.clear()
 
             state_to_save = agent.state_dict()
+            plan_snapshot_ref = getattr(agent, "_dataagent_plan_snapshot_ref", None)
+            latest_plan_snapshot = (
+                plan_snapshot_ref.get("value")
+                if isinstance(plan_snapshot_ref, dict)
+                else None
+            )
+            # ``finish_plan`` clears AgentScope's current_plan. Keep the
+            # last hook snapshot in the session state so the terminal plan
+            # remains visible after a reload instead of being overwritten by
+            # the empty AgentScope notebook state below.
+            if latest_plan_snapshot is not None:
+                state_to_save.setdefault("plan_notebook", {})[
+                    "current_plan"
+                ] = latest_plan_snapshot
             await self.state_service.save_state(
                 user_id=user_id,
                 session_id=session_id,
@@ -1607,11 +1874,15 @@ class AgentService:
             )
             
             # 清理临时交互状态（pending/preview）
-            await self._cleanup_session_pending_state(session_id, is_interrupt=interrupt_monitor.is_interrupted())
+            await self._cleanup_session_pending_state(
+                session_id,
+                is_interrupt=interrupt_monitor.is_interrupted() or turn_cancelled,
+                user_id=user_id,
+            )
             
             # 正常结束时检查计划是否未完成，如果是则创建自动继续待确认状态
             # 用户中断时不创建（中断只是暂停，不需要弹窗询问是否继续）
-            if not interrupt_monitor.is_interrupted():
+            if not interrupt_monitor.is_interrupted() and not turn_cancelled:
                 try:
                     from app.api.kuncode import create_auto_continue_pending
                     

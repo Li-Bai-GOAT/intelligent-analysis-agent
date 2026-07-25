@@ -45,6 +45,7 @@ class PlanUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     expected_outcome: Optional[str] = None
+    state: Optional[str] = None
     subtasks: Optional[List[SubtaskSchema]] = None
 
 
@@ -87,6 +88,8 @@ def update_plan_in_state(state: dict, plan_updates: dict) -> dict:
         current_plan["description"] = plan_updates["description"]
     if plan_updates.get("expected_outcome") is not None:
         current_plan["expected_outcome"] = plan_updates["expected_outcome"]
+    if plan_updates.get("state") is not None:
+        current_plan["state"] = plan_updates["state"]
     if plan_updates.get("subtasks") is not None:
         current_plan["subtasks"] = plan_updates["subtasks"]
 
@@ -246,6 +249,8 @@ async def update_plan(
         updates["description"] = request.description
     if request.expected_outcome is not None:
         updates["expected_outcome"] = request.expected_outcome
+    if request.state is not None:
+        updates["state"] = request.state
     if request.subtasks is not None:
         updates["subtasks"] = [st.model_dump() for st in request.subtasks]
     
