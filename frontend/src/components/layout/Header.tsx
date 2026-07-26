@@ -47,7 +47,7 @@ export function Header() {
 
         {open && (
           <div className="absolute right-0 top-full mt-1 w-44 bg-bg-surface border border-border rounded-lg shadow-xl overflow-hidden z-50">
-            {user?.is_admin && (
+            {user && (
               <button
                 onClick={() => { setPage('admin'); setOpen(false) }}
                 className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"

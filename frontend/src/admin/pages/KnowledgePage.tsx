@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Eye, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { AdminApi } from '../../api/admin'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
@@ -59,7 +59,7 @@ function KnowledgeForm({
   )
 }
 
-export function KnowledgePage() {
+export function KnowledgePage({ readOnly = false }: { readOnly?: boolean }) {
   const [items, setItems] = useState<KnowledgeItem[]>([])
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
@@ -70,6 +70,7 @@ export function KnowledgePage() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [editor, setEditor] = useState<KnowledgeItem | 'new' | null>(null)
+  const [viewing, setViewing] = useState<KnowledgeItem | null>(null)
   const [deleting, setDeleting] = useState<KnowledgeItem | null>(null)
 
   const load = useCallback(async () => {
@@ -138,8 +139,8 @@ export function KnowledgePage() {
     <div className="space-y-5">
       <PageHeader
         title="知识库"
-        description="维护 Agent 可检索的业务知识。修改后将由后端知识服务统一保存。"
-        actions={<Button size="sm" onClick={() => { setEditor('new'); setSuccess('') }}><Plus size={15} />新增条目</Button>}
+        description={readOnly ? '浏览 Agent 可检索的业务知识。' : '维护 Agent 可检索的业务知识。修改后将由后端知识服务统一保存。'}
+        actions={!readOnly ? <Button size="sm" onClick={() => { setEditor('new'); setSuccess('') }}><Plus size={15} />新增条目</Button> : undefined}
       />
       {error && <Notice type="error">{error}</Notice>}
       {success && <Notice type="success">{success}</Notice>}
@@ -161,7 +162,7 @@ export function KnowledgePage() {
         <EmptyState
           title={items.length ? '当前搜索没有结果' : '知识库中还没有条目'}
           description={items.length ? '调整搜索关键字或分类后重试。' : '创建第一条可供 Agent 检索的业务知识。'}
-          action={!items.length ? <Button size="sm" onClick={() => setEditor('new')}><Plus size={15} />新增条目</Button> : undefined}
+          action={!items.length && !readOnly ? <Button size="sm" onClick={() => setEditor('new')}><Plus size={15} />新增条目</Button> : undefined}
         />
       ) : (
         <div className="overflow-x-auto border border-border">
@@ -184,8 +185,8 @@ export function KnowledgePage() {
                   <td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td>
                   <td className="px-4 py-3">
                     <div className="flex justify-end gap-1">
-                      <button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button>
-                      <button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button>
+                      <button title="查看详情" onClick={() => setViewing(item)} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Eye size={15} /></button>
+                      {!readOnly && <><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></>}
                     </div>
                   </td>
                 </tr>
@@ -206,6 +207,11 @@ export function KnowledgePage() {
       {editor && (
         <Modal open title={editor === 'new' ? '新增知识条目' : '编辑知识条目'} size="lg" onClose={() => !busy && setEditor(null)}>
           <KnowledgeForm key={editor === 'new' ? 'new' : editor.id} item={editor === 'new' ? null : editor} busy={busy} onCancel={() => setEditor(null)} onSave={save} />
+        </Modal>
+      )}
+      {viewing && (
+        <Modal open title={viewing.title} size="lg" onClose={() => setViewing(null)} footer={<Button variant="ghost" onClick={() => setViewing(null)}>关闭</Button>}>
+          <div className="space-y-4"><p className="text-xs text-accent">{viewing.category}</p><pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words border border-border bg-bg-base p-4 text-sm leading-6 text-text-secondary">{viewing.content}</pre></div>
         </Modal>
       )}
       <ConfirmDialog

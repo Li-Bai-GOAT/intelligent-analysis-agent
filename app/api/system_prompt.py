@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api.deps import get_admin_user
+from app.api.deps import get_admin_user, get_current_user
 from app.models import User, SystemPrompt
 
 
@@ -73,8 +73,8 @@ async def _ensure_prompt_exists() -> SystemPrompt:
 
 
 @router.get("", response_model=PromptResponse, summary="获取系统提示词")
-async def get_system_prompt(admin: User = Depends(get_admin_user)):
-    """获取系统提示词（仅管理员可查看）"""
+async def get_system_prompt(user: User = Depends(get_current_user)):
+    """获取系统提示词，需要登录。"""
     prompt = await _ensure_prompt_exists()
     return PromptResponse(
         name=prompt.name,

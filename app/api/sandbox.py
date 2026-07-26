@@ -9,12 +9,13 @@ import zipfile
 import shutil
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.deps import get_admin_user
+from app.api.deps import get_admin_user, get_current_user
 from app.models import User, SandboxAgent, SandboxSkill, SandboxMcp
 from app.services.sandbox_injection import get_injection_service
 
@@ -133,6 +134,63 @@ class McpResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+_MASKED_VALUE = "***"
+
+
+def _mask_configuration(values: dict) -> dict:
+    """Keep configuration keys visible without exposing their values."""
+    return {str(key): _MASKED_VALUE for key in values}
+
+
+def _mask_command(command: list) -> list:
+    """Expose the executable and option names, but never option values."""
+    if not command:
+        return []
+
+    masked = [command[0]]
+    for value in command[1:]:
+        text = str(value)
+        if text.startswith("-"):
+            option, separator, _ = text.partition("=")
+            masked.append(f"{option}{separator}{_MASKED_VALUE}" if separator else option)
+        else:
+            masked.append(_MASKED_VALUE)
+    return masked
+
+
+def _mask_url(url: Optional[str]) -> Optional[str]:
+    """Preserve the endpoint identity while removing credentials and query values."""
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return _MASKED_VALUE
+    hostname = parts.hostname or ""
+    netloc = hostname
+    if port:
+        netloc = f"{hostname}:{port}"
+    query = urlencode([(key, _MASKED_VALUE) for key, _ in parse_qsl(parts.query, keep_blank_values=True)])
+    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+
+
+def _mcp_to_response(mcp: SandboxMcp, *, reveal_secrets: bool) -> McpResponse:
+    """Serialize MCP configuration with a single, server-enforced secrecy boundary."""
+    return McpResponse(
+        id=mcp.id,
+        name=mcp.name,
+        mcp_type=mcp.mcp_type,
+        url=mcp.url if reveal_secrets else _mask_url(mcp.url),
+        command=mcp.command if reveal_secrets else _mask_command(mcp.command),
+        headers=mcp.headers if reveal_secrets else _mask_configuration(mcp.headers),
+        environment=mcp.environment if reveal_secrets else _mask_configuration(mcp.environment),
+        enabled=mcp.enabled,
+        created_at=mcp.created_at.isoformat(),
+        updated_at=mcp.updated_at.isoformat(),
+    )
+
+
 # ==================== Agent APIs ====================
 
 @router.get("/agents", response_model=list[AgentResponse], summary="获取Agent列表")
@@ -160,7 +218,7 @@ async def list_agents(admin: User = Depends(get_admin_user)):
 
 
 @router.get("/agents/names", summary="获取可用Agent名称列表")
-async def list_agent_names(mode: str = "primary"):
+async def list_agent_names(mode: str = "primary", admin: User = Depends(get_admin_user)):
     """获取可用 Agent 名称列表（用于下拉选择）
     
     Args:
@@ -283,8 +341,8 @@ async def _skill_to_response(skill: SandboxSkill) -> SkillResponse:
 
 
 @router.get("/skills", response_model=list[SkillResponse], summary="获取Skill列表")
-async def list_skills(admin: User = Depends(get_admin_user)):
-    """获取所有 Skill 列表"""
+async def list_skills(user: User = Depends(get_current_user)):
+    """获取所有 Skill 列表，需要登录。"""
     skills = await SandboxSkill.all().order_by("-updated_at")
     return [await _skill_to_response(s) for s in skills]
 
@@ -389,8 +447,8 @@ async def upload_skill(
 
 
 @router.get("/skills/{skill_id}", response_model=SkillResponse, summary="获取Skill详情")
-async def get_skill(skill_id: int, admin: User = Depends(get_admin_user)):
-    """获取单个 Skill 详情"""
+async def get_skill(skill_id: int, user: User = Depends(get_current_user)):
+    """获取单个 Skill 详情，需要登录。"""
     skill = await SandboxSkill.filter(id=skill_id).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill 不存在")
@@ -426,8 +484,8 @@ async def delete_skill(skill_id: int, admin: User = Depends(get_admin_user)):
 
 
 @router.get("/skills/{skill_id}/files", summary="获取Skill文件树")
-async def get_skill_files(skill_id: int, admin: User = Depends(get_admin_user)):
-    """获取 Skill 文件树"""
+async def get_skill_files(skill_id: int, user: User = Depends(get_current_user)):
+    """获取 Skill 文件树，需要登录。"""
     skill = await SandboxSkill.filter(id=skill_id).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill 不存在")
@@ -459,9 +517,9 @@ async def get_skill_files(skill_id: int, admin: User = Depends(get_admin_user)):
 async def get_skill_file_content(
     skill_id: int, 
     file_path: str, 
-    admin: User = Depends(get_admin_user)
+    user: User = Depends(get_current_user)
 ):
-    """获取 Skill 文件内容"""
+    """获取 Skill 文件内容，需要登录。"""
     skill = await SandboxSkill.filter(id=skill_id).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill 不存在")
@@ -497,24 +555,10 @@ async def get_skill_file_content(
 # ==================== MCP APIs ====================
 
 @router.get("/mcps", response_model=list[McpResponse], summary="获取MCP列表")
-async def list_mcps(admin: User = Depends(get_admin_user)):
-    """获取所有 MCP 列表"""
+async def list_mcps(user: User = Depends(get_current_user)):
+    """获取所有 MCP 列表；普通用户的配置值会被脱敏。"""
     mcps = await SandboxMcp.all().order_by("-updated_at")
-    return [
-        McpResponse(
-            id=m.id,
-            name=m.name,
-            mcp_type=m.mcp_type,
-            url=m.url,
-            command=m.command,
-            headers=m.headers,
-            environment=m.environment,
-            enabled=m.enabled,
-            created_at=m.created_at.isoformat(),
-            updated_at=m.updated_at.isoformat(),
-        )
-        for m in mcps
-    ]
+    return [_mcp_to_response(m, reveal_secrets=user.is_admin) for m in mcps]
 
 
 @router.post("/mcps", response_model=McpResponse, status_code=status.HTTP_201_CREATED, summary="创建MCP")
@@ -540,24 +584,13 @@ async def create_mcp(data: McpCreate, admin: User = Depends(get_admin_user)):
 
 
 @router.get("/mcps/{mcp_id}", response_model=McpResponse, summary="获取MCP详情")
-async def get_mcp(mcp_id: int, admin: User = Depends(get_admin_user)):
-    """获取单个 MCP 详情"""
+async def get_mcp(mcp_id: int, user: User = Depends(get_current_user)):
+    """获取单个 MCP 详情；普通用户的配置值会被脱敏。"""
     mcp = await SandboxMcp.filter(id=mcp_id).first()
     if not mcp:
         raise HTTPException(status_code=404, detail="MCP 不存在")
     
-    return McpResponse(
-        id=mcp.id,
-        name=mcp.name,
-        mcp_type=mcp.mcp_type,
-        url=mcp.url,
-        command=mcp.command,
-        headers=mcp.headers,
-        environment=mcp.environment,
-        enabled=mcp.enabled,
-        created_at=mcp.created_at.isoformat(),
-        updated_at=mcp.updated_at.isoformat(),
-    )
+    return _mcp_to_response(mcp, reveal_secrets=user.is_admin)
 
 
 @router.put("/mcps/{mcp_id}", response_model=McpResponse, summary="更新MCP")

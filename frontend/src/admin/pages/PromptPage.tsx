@@ -5,7 +5,7 @@ import { Button } from '../../components/ui/Button'
 import { LoadingState, Notice, PageHeader } from '../components/AdminUi'
 import { formatDate, textareaClass } from '../utils'
 
-export function PromptPage() {
+export function PromptPage({ readOnly = false }: { readOnly?: boolean }) {
   const [name, setName] = useState('')
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
@@ -15,7 +15,7 @@ export function PromptPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-  const dirty = content !== savedContent
+  const dirty = !readOnly && content !== savedContent
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -78,11 +78,11 @@ export function PromptPage() {
     <div className="space-y-5">
       <PageHeader
         title="系统提示词"
-        description="维护产品经理 Agent 的全局行为规则。保存后仅影响后续请求。"
+        description={readOnly ? '查看产品经理 Agent 的全局行为规则。' : '维护产品经理 Agent 的全局行为规则。保存后仅影响后续请求。'}
         actions={
           <>
             <Button variant="secondary" size="sm" onClick={reload} disabled={loading || saving}><RefreshCw size={15} />重新加载</Button>
-            <Button size="sm" onClick={save} disabled={loading || saving || !dirty}><Save size={15} />{saving ? '正在保存' : '保存修改'}</Button>
+            {!readOnly && <Button size="sm" onClick={save} disabled={loading || saving || !dirty}><Save size={15} />{saving ? '正在保存' : '保存修改'}</Button>}
           </>
         }
       />
@@ -100,6 +100,7 @@ export function PromptPage() {
             className={`${textareaClass} min-h-[520px] bg-[#0d1117] p-4 font-mono text-[13px]`}
             value={content}
             onChange={(event) => { setContent(event.target.value); setSuccess('') }}
+            readOnly={readOnly}
             spellCheck={false}
           />
           <div className="flex justify-between text-xs text-text-muted">

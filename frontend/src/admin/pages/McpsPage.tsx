@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { Eye, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { AdminApi } from '../../api/admin'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
@@ -77,7 +77,21 @@ function McpForm({ item, busy, onCancel, onSave }: { item: McpConfig | null; bus
   )
 }
 
-export function McpsPage() {
+function McpDetails({ item, readOnly }: { item: McpConfig; readOnly: boolean }) {
+  const config = item.mcp_type === 'remote'
+    ? [['服务 URL', item.url || '未配置'], ['请求头', JSON.stringify(item.headers, null, 2)]]
+    : [['启动命令', item.command.join(' ') || '未配置'], ['环境变量', JSON.stringify(item.environment, null, 2)]]
+
+  return (
+    <div className="space-y-4">
+      {readOnly && <Notice type="success">配置值已脱敏；仅管理员可查看完整凭据。</Notice>}
+      <div className="grid gap-3 sm:grid-cols-2"><div><p className="text-xs text-text-muted">服务类型</p><p className="mt-1 font-mono text-sm text-text-primary">{item.mcp_type}</p></div><div><p className="text-xs text-text-muted">运行状态</p><div className="mt-1"><StatusBadge enabled={item.enabled} /></div></div></div>
+      {config.map(([label, value]) => <div key={label}><p className="text-xs text-text-muted">{label}</p><pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-words border border-border bg-bg-base p-3 font-mono text-xs leading-5 text-text-secondary">{value}</pre></div>)}
+    </div>
+  )
+}
+
+export function McpsPage({ readOnly = false }: { readOnly?: boolean }) {
   const [items, setItems] = useState<McpConfig[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
@@ -85,6 +99,7 @@ export function McpsPage() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [editor, setEditor] = useState<McpConfig | 'new' | null>(null)
+  const [viewing, setViewing] = useState<McpConfig | null>(null)
   const [deleting, setDeleting] = useState<McpConfig | null>(null)
 
   const load = useCallback(async () => {
@@ -127,17 +142,18 @@ export function McpsPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="MCP 管理" description="维护 KunCode 可调用的本地与远程 MCP 工具服务。" actions={<Button size="sm" onClick={() => { setEditor('new'); setSuccess('') }}><Plus size={15} />新建 MCP</Button>} />
+      <PageHeader title="MCP 管理" description={readOnly ? '浏览 KunCode 可调用的 MCP 服务；敏感配置已脱敏。' : '维护 KunCode 可调用的本地与远程 MCP 工具服务。'} actions={!readOnly ? <Button size="sm" onClick={() => { setEditor('new'); setSuccess('') }}><Plus size={15} />新建 MCP</Button> : undefined} />
       {error && <Notice type="error">{error}</Notice>}{success && <Notice type="success">{success}</Notice>}
       <div className="relative max-w-xl"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" /><input className={`${inputClass} pl-9`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、URL 或命令" /></div>
-      <Notice type="error">当前后端尚未提供 MCP 连接测试和密钥脱敏接口；保存前请确认配置来源可信。</Notice>
+      {readOnly && <Notice type="success">敏感配置已由后端脱敏，页面不会接收真实凭据。</Notice>}
 
-      {loading ? <LoadingState label="正在加载 MCP 配置" /> : visibleItems.length === 0 ? <EmptyState title={items.length ? '没有匹配的 MCP' : '尚未配置 MCP'} description={items.length ? '调整搜索内容后重试。' : '创建 MCP 后可将外部工具能力提供给 KunCode。'} action={!items.length ? <Button size="sm" onClick={() => setEditor('new')}><Plus size={15} />新建 MCP</Button> : undefined} /> : (
+      {loading ? <LoadingState label="正在加载 MCP 配置" /> : visibleItems.length === 0 ? <EmptyState title={items.length ? '没有匹配的 MCP' : '尚未配置 MCP'} description={items.length ? '调整搜索内容后重试。' : readOnly ? '当前没有可浏览的 MCP 服务。' : '创建 MCP 后可将外部工具能力提供给 KunCode。'} action={!items.length && !readOnly ? <Button size="sm" onClick={() => setEditor('new')}><Plus size={15} />新建 MCP</Button> : undefined} /> : (
         <div className="overflow-x-auto border border-border"><table className="w-full min-w-[800px] border-collapse text-left"><thead className="bg-bg-elevated text-xs text-text-secondary"><tr><th className="px-4 py-3 font-medium">MCP</th><th className="px-4 py-3 font-medium">类型</th><th className="px-4 py-3 font-medium">连接目标</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">更新时间</th><th className="w-24 px-4 py-3 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-border bg-bg-surface">
-          {visibleItems.map((item) => <tr key={item.id} className="hover:bg-bg-elevated/60"><td className="px-4 py-3 text-sm font-medium text-text-primary">{item.name}</td><td className="px-4 py-3 font-mono text-xs text-accent">{item.mcp_type}</td><td className="max-w-md px-4 py-3"><p className="truncate font-mono text-xs text-text-secondary">{item.mcp_type === 'remote' ? item.url : item.command.join(' ')}</p></td><td className="px-4 py-3"><StatusBadge enabled={item.enabled} /></td><td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td><td className="px-4 py-3"><div className="flex justify-end gap-1"><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></div></td></tr>)}
+          {visibleItems.map((item) => <tr key={item.id} className="hover:bg-bg-elevated/60"><td className="px-4 py-3 text-sm font-medium text-text-primary">{item.name}</td><td className="px-4 py-3 font-mono text-xs text-accent">{item.mcp_type}</td><td className="max-w-md px-4 py-3"><p className="truncate font-mono text-xs text-text-secondary">{item.mcp_type === 'remote' ? item.url : item.command.join(' ')}</p></td><td className="px-4 py-3"><StatusBadge enabled={item.enabled} /></td><td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td><td className="px-4 py-3"><div className="flex justify-end gap-1"><button title="查看详情" onClick={() => setViewing(item)} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Eye size={15} /></button>{!readOnly && <><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></>}</div></td></tr>)}
         </tbody></table></div>
       )}
       {editor && <Modal open title={editor === 'new' ? '新建 MCP' : `编辑 ${editor.name}`} size="lg" onClose={() => !busy && setEditor(null)}><McpForm key={editor === 'new' ? 'new' : editor.id} item={editor === 'new' ? null : editor} busy={busy} onCancel={() => setEditor(null)} onSave={save} /></Modal>}
+      {viewing && <Modal open title={`MCP · ${viewing.name}`} size="lg" onClose={() => setViewing(null)} footer={<Button variant="ghost" onClick={() => setViewing(null)}>关闭</Button>}><McpDetails item={viewing} readOnly={readOnly} /></Modal>}
       <ConfirmDialog open={Boolean(deleting)} title="删除 MCP" message={`确定删除 MCP“${deleting?.name ?? ''}”吗？后续沙箱将无法注入该服务。`} busy={busy} onClose={() => setDeleting(null)} onConfirm={remove} />
     </div>
   )

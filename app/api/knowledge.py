@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.models.user import User
-from app.api.deps import get_admin_user
+from app.api.deps import get_admin_user, get_current_user
 from app.schemas.knowledge import KnowledgeCreate, KnowledgeUpdate, KnowledgeResponse
 from app.services.knowledge_service import KnowledgeService
 
@@ -21,9 +21,9 @@ async def list_knowledge(
     category: Optional[str] = Query(None, description="类别筛选"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    admin: User = Depends(get_admin_user),
+    user: User = Depends(get_current_user),
 ):
-    """分页获取知识库条目，支持按类别筛选，需要管理员权限"""
+    """分页获取知识库条目，支持按类别筛选，需要登录。"""
     items, total = await KnowledgeService.list(category, limit, offset)
     return {
         "items": [KnowledgeResponse.model_validate(item) for item in items],
@@ -36,9 +36,9 @@ async def list_knowledge(
 @router.get("/{item_id}", response_model=KnowledgeResponse, summary="获取知识详情")
 async def get_knowledge(
     item_id: UUID,
-    admin: User = Depends(get_admin_user),
+    user: User = Depends(get_current_user),
 ):
-    """根据 ID 获取单个知识条目的完整内容，需要管理员权限"""
+    """根据 ID 获取单个知识条目的完整内容，需要登录。"""
     item = await KnowledgeService.get(item_id)
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识条目不存在")

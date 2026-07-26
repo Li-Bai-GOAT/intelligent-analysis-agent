@@ -13,7 +13,7 @@ export function ContextRing({ percent, tokens = 0, maxTokens = 120000 }: Context
 
   return (
     <div
-      className="relative w-9 h-9 shrink-0 cursor-default"
+      className="relative size-[38px] shrink-0 cursor-default"
       title={`上下文: ${(tokens / 1000).toFixed(1)}K / ${(maxTokens / 1000).toFixed(0)}K tokens (${percent.toFixed(1)}%)`}
     >
       <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">

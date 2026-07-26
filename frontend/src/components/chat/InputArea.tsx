@@ -40,7 +40,7 @@ export function InputArea() {
   }
 
   return (
-    <div className="px-5 py-3 bg-bg-surface border-t border-border">
+    <div className="px-4 py-2.5 bg-bg-surface border-t border-border">
       {pendingFiles.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-2">
           {pendingFiles.map((f, i) => (
@@ -55,16 +55,16 @@ export function InputArea() {
         </div>
       )}
 
-      <div className="mb-2 flex items-center gap-1" role="group" aria-label="执行模式">
-        <button type="button" onClick={() => setExecutionMode('auto')} className={`rounded px-2.5 py-1 text-xs transition-colors ${executionMode === 'auto' ? 'bg-accent text-bg-base' : 'bg-bg-elevated text-text-muted hover:text-text-primary'}`}>自动</button>
-        <button type="button" onClick={() => setExecutionMode('kuncode')} className={`rounded px-2.5 py-1 text-xs transition-colors ${executionMode === 'kuncode' ? 'bg-accent text-bg-base' : 'bg-bg-elevated text-text-muted hover:text-text-primary'}`}>KunCode</button>
+      <div className="mb-2 inline-flex items-center gap-1" role="group" aria-label="执行模式">
+        <button type="button" onClick={() => setExecutionMode('auto')} className={`inline-flex h-[38px] w-[82px] items-center justify-center rounded-lg border text-[11px] font-medium transition-colors ${executionMode === 'auto' ? 'border-accent bg-accent text-bg-base shadow-sm' : 'border-border bg-bg-elevated text-text-muted hover:border-border-light hover:bg-bg-hover hover:text-text-primary'}`}>自动</button>
+        <button type="button" onClick={() => setExecutionMode('kuncode')} className={`inline-flex h-[38px] w-[82px] items-center justify-center rounded-lg border text-[11px] font-medium transition-colors ${executionMode === 'kuncode' ? 'border-accent bg-accent text-bg-base shadow-sm' : 'border-border bg-bg-elevated text-text-muted hover:border-border-light hover:bg-bg-hover hover:text-text-primary'}`}>KunCode</button>
       </div>
 
-      <div className="flex items-end gap-2.5">
+      <div className="flex items-end gap-2">
         <input type="file" ref={fileInputRef} multiple hidden onChange={handleFileSelect} />
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="p-2.5 rounded-lg bg-bg-elevated border border-border text-text-muted hover:text-accent hover:border-accent/30 transition-colors cursor-pointer"
+          className="inline-flex size-[38px] shrink-0 items-center justify-center rounded-lg border border-border bg-bg-elevated text-text-muted transition-colors hover:border-accent/30 hover:text-accent cursor-pointer"
           title="上传文件"
         >
           <Paperclip size={18} />
@@ -76,9 +76,8 @@ export function InputArea() {
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder="输入消息..."
           rows={1}
-          className="flex-1 resize-none bg-bg-elevated border border-border rounded-lg px-3.5 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-all"
+          className="h-[38px] min-h-[38px] max-h-[150px] flex-1 resize-none overflow-y-auto bg-bg-elevated border border-border rounded-lg px-3 py-[6px] text-[19px] leading-6 text-text-primary placeholder:text-[19px] placeholder:text-text-muted focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-all"
         />
 
         {contextInfo && (
@@ -92,7 +91,7 @@ export function InputArea() {
         <button
           onClick={isStreaming ? disconnectStream : () => void handleSend()}
           disabled={!isStreaming && (!text.trim() || !currentSession)}
-          className={`p-2.5 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed
+          className={`inline-flex size-[38px] shrink-0 items-center justify-center rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed
             ${isStreaming
               ? 'bg-error/15 text-error border border-error/30 hover:bg-error/25'
               : 'bg-accent text-bg-base hover:bg-accent-hover shadow-[0_2px_8px_rgba(45,212,168,0.25)]'

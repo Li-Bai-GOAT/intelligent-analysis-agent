@@ -17,11 +17,11 @@ const navigation: Array<{ key: AdminSection; label: string; description: string;
   { key: 'mcps', label: 'MCP', description: '外部工具服务', icon: PlugZap },
 ]
 
-function CurrentPage({ section }: { section: AdminSection }) {
-  if (section === 'knowledge') return <KnowledgePage />
-  if (section === 'prompt') return <PromptPage />
-  if (section === 'skills') return <SkillsPage />
-  if (section === 'mcps') return <McpsPage />
+function CurrentPage({ section, readOnly }: { section: AdminSection; readOnly: boolean }) {
+  if (section === 'knowledge') return <KnowledgePage readOnly={readOnly} />
+  if (section === 'prompt') return <PromptPage readOnly={readOnly} />
+  if (section === 'skills') return <SkillsPage readOnly={readOnly} />
+  if (section === 'mcps') return <McpsPage readOnly={readOnly} />
   return <OverviewPage />
 }
 
@@ -30,19 +30,21 @@ export function AdminApp() {
   const adminTab = useUiStore((state) => state.adminTab)
   const setAdminTab = useUiStore((state) => state.setAdminTab)
 
-  if (!user?.is_admin) {
+  if (!user) {
     return (
       <div className="flex h-screen flex-col bg-bg-base">
         <Header />
         <div className="flex flex-1 items-center justify-center px-6 text-center">
           <div>
-            <p className="text-sm font-medium text-text-primary">无法访问管理后台</p>
-            <p className="mt-2 text-xs text-text-secondary">当前账号没有管理员权限。</p>
+            <p className="text-sm font-medium text-text-primary">请先登录</p>
+            <p className="mt-2 text-xs text-text-secondary">登录后可进入管理后台。</p>
           </div>
         </div>
       </div>
     )
   }
+
+  const readOnly = !user.is_admin
 
   return (
     <div className="flex h-screen flex-col bg-bg-base">
@@ -51,6 +53,7 @@ export function AdminApp() {
         <aside className="flex shrink-0 flex-col border-b border-border bg-bg-surface md:w-60 md:border-b-0 md:border-r">
           <div className="hidden px-4 pb-2 pt-5 md:block">
             <p className="text-xs font-semibold uppercase text-text-muted">管理工作台</p>
+            {readOnly && <p className="mt-1 text-xs text-warning">只读访问</p>}
           </div>
           <nav className="flex gap-1 overflow-x-auto px-3 py-2 md:flex-col md:overflow-visible md:py-1" aria-label="管理后台导航">
             {navigation.map(({ key, label, description, icon: Icon }) => {
@@ -82,7 +85,8 @@ export function AdminApp() {
 
         <main className="min-w-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8 lg:py-7">
-            <CurrentPage section={adminTab} />
+            {readOnly && <div className="mb-5 border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-text-secondary">当前账号仅有查看权限，配置变更请联系管理员。</div>}
+            <CurrentPage section={adminTab} readOnly={readOnly} />
           </div>
         </main>
       </div>

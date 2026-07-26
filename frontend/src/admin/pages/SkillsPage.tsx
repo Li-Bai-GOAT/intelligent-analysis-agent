@@ -35,7 +35,7 @@ function FileTreeNodes({ nodes, onOpen }: { nodes: SkillFileNode[]; onOpen: (nod
   )
 }
 
-export function SkillsPage() {
+export function SkillsPage({ readOnly = false }: { readOnly?: boolean }) {
   const uploadRef = useRef<HTMLInputElement>(null)
   const [items, setItems] = useState<SkillConfig[]>([])
   const [query, setQuery] = useState('')
@@ -98,13 +98,13 @@ export function SkillsPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Skill 管理" description="上传并维护 KunCode 能力包；启用后的 Skill 会自动提供给默认执行环境。" actions={<><input ref={uploadRef} className="hidden" type="file" accept=".zip,application/zip" onChange={(event) => void upload(event.target.files?.[0])} /><Button size="sm" onClick={() => uploadRef.current?.click()} disabled={busy}><Upload size={15} />{busy ? '处理中' : '上传 ZIP'}</Button></>} />
+      <PageHeader title="Skill 管理" description={readOnly ? '浏览 KunCode 能力包及其文件内容。' : '上传并维护 KunCode 能力包；启用后的 Skill 会自动提供给默认执行环境。'} actions={!readOnly ? <><input ref={uploadRef} className="hidden" type="file" accept=".zip,application/zip" onChange={(event) => void upload(event.target.files?.[0])} /><Button size="sm" onClick={() => uploadRef.current?.click()} disabled={busy}><Upload size={15} />{busy ? '处理中' : '上传 ZIP'}</Button></> : undefined} />
       {error && <Notice type="error">{error}</Notice>}{success && <Notice type="success">{success}</Notice>}
       <div className="relative max-w-xl"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" /><input className={`${inputClass} pl-9`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或描述" /></div>
 
-      {loading ? <LoadingState label="正在加载 Skill" /> : visibleItems.length === 0 ? <EmptyState title={items.length ? '没有匹配的 Skill' : '尚未上传 Skill'} description={items.length ? '调整搜索内容后重试。' : '上传包含 SKILL.md 的 ZIP 压缩包以添加能力。'} action={!items.length ? <Button size="sm" onClick={() => uploadRef.current?.click()}><Upload size={15} />上传 ZIP</Button> : undefined} /> : (
+      {loading ? <LoadingState label="正在加载 Skill" /> : visibleItems.length === 0 ? <EmptyState title={items.length ? '没有匹配的 Skill' : '尚未上传 Skill'} description={items.length ? '调整搜索内容后重试。' : readOnly ? '当前没有可浏览的 Skill。' : '上传包含 SKILL.md 的 ZIP 压缩包以添加能力。'} action={!items.length && !readOnly ? <Button size="sm" onClick={() => uploadRef.current?.click()}><Upload size={15} />上传 ZIP</Button> : undefined} /> : (
         <div className="overflow-x-auto border border-border"><table className="w-full min-w-[680px] border-collapse text-left"><thead className="bg-bg-elevated text-xs text-text-secondary"><tr><th className="px-4 py-3 font-medium">Skill</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">更新时间</th><th className="w-28 px-4 py-3 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-border bg-bg-surface">
-          {visibleItems.map((item) => <tr key={item.id} className="hover:bg-bg-elevated/60"><td className="max-w-lg px-4 py-3"><p className="text-sm font-medium text-text-primary">{item.name}</p><p className="mt-1 line-clamp-1 text-xs text-text-secondary">{item.description}</p></td><td className="px-4 py-3"><div className="flex items-center gap-3"><Switch checked={item.enabled} onChange={(value) => void toggle(item, value)} /><StatusBadge enabled={item.enabled} /></div></td><td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td><td className="px-4 py-3"><div className="flex justify-end gap-1"><button title="查看文件" onClick={() => void openDetail(item)} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Settings2 size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></div></td></tr>)}
+          {visibleItems.map((item) => <tr key={item.id} className="hover:bg-bg-elevated/60"><td className="max-w-lg px-4 py-3"><p className="text-sm font-medium text-text-primary">{item.name}</p><p className="mt-1 line-clamp-1 text-xs text-text-secondary">{item.description}</p></td><td className="px-4 py-3"><div className="flex items-center gap-3">{readOnly ? <StatusBadge enabled={item.enabled} /> : <><Switch checked={item.enabled} onChange={(value) => void toggle(item, value)} /><StatusBadge enabled={item.enabled} /></>}</div></td><td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td><td className="px-4 py-3"><div className="flex justify-end gap-1"><button title="查看文件" onClick={() => void openDetail(item)} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Settings2 size={15} /></button>{!readOnly && <button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button>}</div></td></tr>)}
         </tbody></table></div>
       )}
 
