@@ -7,6 +7,7 @@
 - [README](../README.md)：项目定位、功能概览、安装和使用入口。
 - [AGENTS](../AGENTS.md)：当前架构、运行约定、数据边界与验证要求。
 - [system_prompt](../system_prompt.md)：DataPM 默认系统提示词。
+- [项目目录地图](project-structure.md)：按文件夹定位代码、运行时数据、基础设施与归档资料。
 
 ## 规划
 
@@ -16,6 +17,8 @@
 | [管理后台前端重构方案](plans/admin-ui-refactor-plan.md) | 管理后台的信息架构与重构计划 | 作为规划参考，不代表所有阶段均已落地。 |
 | [数据分析 Skill / 知识库 E2E 执行计划](plans/data-skill-knowledge-e2e-plan.md) | 数据技能和知识库的端到端执行计划 | 已有对应验收报告可供对照。 |
 | [单轮对话聚合与 KunCode 结束态修复计划](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 修复一问多思考/多回答、过度规划与 KunCode 永久运行态 | 按状态协议、回合投影、提示词和真实浏览器矩阵分阶段实施。 |
+| [普通用户后台只读访问改造计划](plans/read-only-admin-access-plan.md) | 对已登录普通用户开放后台只读浏览，管理员保留写操作 | 实施前重点核对鉴权、MCP 脱敏与 401/403 行为。 |
+| [计划面板实时更新计划](plans/plan-panel-realtime-update-plan.md) | 将后端 `plan` SSE 事件同步到右侧计划面板 | 聚焦流式状态、持久化状态和会话切换的一致性。 |
 
 ## 验收报告
 
@@ -26,6 +29,6 @@
 ## 不纳入本目录的 Markdown
 
 - `sandbox_skills/`：沙箱运行时的 Skill 说明、参考资料和模板。
-- `artifacts/e2e_data_skills/`：端到端验证生成的报告产物。
+- `artifacts/`：端到端验证产物、审查证据和本地历史归档，见 [artifacts/README.md](../artifacts/README.md)。
 
 这些文件应与相应运行资产保留在同一目录，避免文档与实际输入、输出脱离。
