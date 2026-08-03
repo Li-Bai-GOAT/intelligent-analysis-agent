@@ -542,11 +542,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break
       }
       case 'plan': {
+        const planState = data.state || data.phase || data.execution_status || 'running'
         const plan = {
           name: data.name || data.content || '分析计划',
           description: data.description || '',
           expected_outcome: data.expected_outcome || '',
-          state: data.phase === 'completed' ? 'done' : data.phase === 'failed' ? 'failed' : data.phase === 'cancelled' ? 'abandoned' : (data.execution_status || 'running'),
+          // PlanNotebook emits its own lifecycle through `state` (todo,
+          // in_progress, done, failed).  `phase` belongs to the surrounding
+          // task stream and is normally just `progress`, so using it here
+          // kept completed plans visually stuck in "running" until the turn
+          // ended and the panel reloaded from storage.
+          state: planState === 'completed' ? 'done' : planState === 'cancelled' ? 'abandoned' : planState,
           subtasks: Array.isArray(data.subtasks)
             ? data.subtasks.map((task) => ({
                 name: task.name || '',

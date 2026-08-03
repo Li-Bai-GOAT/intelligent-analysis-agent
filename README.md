@@ -265,22 +265,6 @@ dataagent/
 └── AGENTS.md                # 当前运行与开发约束基线
 ```
 
----
-
-## 🎤 面试速览
-
-可以用下面这段介绍项目：
-
-> DataAgent 是一个将自然语言数据需求转化为受控沙箱任务的全栈智能体平台。前端使用 React 通过 SSE 展示任务过程，FastAPI 负责鉴权、会话、任务流和文件交付；DataPM 负责需求理解与工具编排，KunCode 在会话绑定的 Docker 沙箱中完成实际分析。PostgreSQL 保存业务事实，Redis 支撑可恢复任务流和人工确认，Milvus 提供可重建的知识库向量检索，从而兼顾易用性、可追踪性和执行隔离。
-
-建议按以下顺序熟悉项目：
-
-1. 本 README：项目目标、架构、核心流程与运行方式。
-2. [AGENTS.md](AGENTS.md)：端口、事件协议、数据所有权和验收要求。
-3. `app/services/agent_service.py` 与 `app/tasks.py`：智能体、沙箱和长任务关键实现。
-4. `frontend/src/stores/session.ts` 与 `frontend/src/types/index.ts`：SSE 如何驱动前端状态。
-5. [docs/README.md](docs/README.md)：历次优化、整改与验收记录。
-
 ## License
 
 MIT License

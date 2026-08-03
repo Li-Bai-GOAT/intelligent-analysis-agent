@@ -22,6 +22,8 @@ from app.repositories.session_repo import SessionRepository
 from app.services.agent_service import (
     AgentService,
     _build_streamed_tool_result,
+    _build_streamed_tool_progress,
+    _get_tool_result_id,
     _build_terminal_tool_results,
     _build_kuncode_completion_message,
     _extract_persisted_tool_results,
@@ -397,6 +399,27 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         failed = _build_streamed_tool_result("call-2", "[ERROR] sandbox failed")
         self.assertEqual(failed["execution_status"], "failed")
+
+    async def test_streamed_tool_progress_remains_running_until_the_final_chunk(self):
+        event = _build_streamed_tool_progress(
+            "call-1",
+            [{"type": "text", "text": "KunCode is still running"}],
+        )
+
+        self.assertEqual(event["type"], "tool_result")
+        self.assertEqual(event["tool_id"], "call-1")
+        self.assertEqual(event["phase"], "progress")
+        self.assertEqual(event["execution_status"], "running")
+
+    async def test_live_tool_result_accepts_agentscope_id_field(self):
+        self.assertEqual(
+            _get_tool_result_id({"id": "call-from-agentscope"}),
+            "call-from-agentscope",
+        )
+        self.assertEqual(
+            _get_tool_result_id({"tool_use_id": "call-from-provider", "id": "legacy"}),
+            "call-from-provider",
+        )
 
     async def test_recovered_intermediate_error_keeps_successful_final_status(self):
         recovered = (

@@ -181,6 +181,41 @@ def _build_streamed_tool_result(tool_id: str, output: Any) -> dict:
     }
 
 
+def _build_streamed_tool_progress(tool_id: str, output: Any) -> dict:
+    """Normalize a non-terminal streamed tool chunk for the terminal UI.
+
+    AgentScope emits every chunk of a streaming tool as a ``tool_result``
+    message.  Only its final chunk means the underlying call has returned.
+    Keeping intermediate chunks explicitly running prevents the UI from
+    treating a partial KunCode/sandbox output as a completed operation.
+    """
+    if isinstance(output, str):
+        result_text = output
+    elif output is None:
+        result_text = ""
+    else:
+        result_text = json.dumps(output, ensure_ascii=False)
+
+    return {
+        "type": "tool_result",
+        "content": result_text,
+        "tool_id": tool_id,
+        "phase": "progress",
+        "execution_status": "running",
+    }
+
+
+def _get_tool_result_id(block: dict[str, Any]) -> str:
+    """Return the tool call ID from either AgentScope result block shape.
+
+    ``ReActAgent`` currently prints ``ToolResultBlock(id=<tool-call-id>)``.
+    Some provider adapters instead use ``tool_use_id``.  Reading both keeps
+    the live result linked to the original terminal entry instead of waiting
+    for end-of-turn persistence recovery.
+    """
+    return str(block.get("tool_use_id") or block.get("id") or "")
+
+
 def _tool_output_failed(output: str) -> bool:
     """Judge the final tool outcome without treating recovered errors as fatal."""
     rendered = output
@@ -1761,11 +1796,17 @@ class AgentService:
                                     elif block_type == "tool_result":
                                         output = item.get("output", [])
                                         text_parts = [o.get("text", "") for o in output if isinstance(o, dict) and o.get("type") == "text"]
-                                        tool_id = item.get("tool_use_id", "")
+                                        tool_id = _get_tool_result_id(item)
                                         result_text = "".join(text_parts)
-                                        # 移除已完成的 tool_call
-                                        pending_tool_calls.pop(tool_id, None)
-                                        yield _build_streamed_tool_result(tool_id, result_text)
+                                        # AgentScope prints every streaming output chunk as a
+                                        # tool_result.  Only the final chunk closes the call;
+                                        # earlier chunks should update its output while retaining
+                                        # the running state in the terminal.
+                                        if is_last_chunk:
+                                            pending_tool_calls.pop(tool_id, None)
+                                            yield _build_streamed_tool_result(tool_id, result_text)
+                                        else:
+                                            yield _build_streamed_tool_progress(tool_id, result_text)
                                     elif block_type == "data":
                                         # AgentScope stores plugin_call_output blocks in this
                                         # shape. A matching block is the real terminal result.

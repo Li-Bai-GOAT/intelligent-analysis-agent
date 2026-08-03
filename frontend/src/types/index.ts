@@ -65,6 +65,7 @@ export interface StreamData {
   data?: unknown
   input?: unknown
   name?: string
+  state?: string
   description?: string
   expected_outcome?: string
   subtasks?: PlanSubtaskData[]
