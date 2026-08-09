@@ -35,9 +35,26 @@ export interface ToolCall {
   arguments: string
   result?: string
   execution_status?: ToolExecutionStatus
+  stage?: ToolRuntimeStage
+  stage_message?: string
+  attempt_index?: number
+  exit_code?: number
+  error_code?: string
 }
 
 export type ToolExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled'
+export type ToolRuntimeStage =
+  | 'sandbox_preparing'
+  | 'model_processing'
+  | 'dependency_checking'
+  | 'dependency_installing'
+  | 'file_generating'
+  | 'repairing'
+  | 'validating'
+  | 'finalizing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 
 export interface PlanSubtaskData {
   name: string
@@ -55,7 +72,7 @@ export interface PlanData {
 }
 
 export interface StreamData {
-  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'end' | 'error' | 'status' | 'plan' | 'kuncode_preview' | 'plan_preview' | 'plan_confirmed' | 'kuncode_confirmed' | 'user_input_request' | 'user_input_required' | 'user_input_received' | 'context_update' | 'auto_continue' | 'interrupted' | 'step_complete'
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_progress' | 'tool_result' | 'end' | 'error' | 'status' | 'plan' | 'kuncode_preview' | 'plan_preview' | 'plan_confirmed' | 'kuncode_confirmed' | 'user_input_request' | 'user_input_required' | 'user_input_received' | 'context_update' | 'auto_continue' | 'interrupted' | 'step_complete'
   content?: string
   tool_id?: string
   tool_name?: string
@@ -77,6 +94,12 @@ export interface StreamData {
   request_id?: string
   phase?: 'started' | 'progress' | 'completed' | 'failed' | 'cancelled'
   execution_status?: 'running' | 'completed' | 'failed' | 'cancelled'
+  stage?: ToolRuntimeStage
+  message?: string
+  attempt_index?: number
+  success?: boolean
+  exit_code?: number | null
+  error_code?: string | null
   generated_files?: string[]
 }
 

@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     MODEL_TEMPERATURE: float = 0.5
     MAX_TOKENS: int = 200000
     TOOL_OUTPUT_MAX_LENGTH: int = 8000
+    MODEL_STREAM_MAX_RETRIES: int = 2
+    MODEL_STREAM_RETRY_DELAY_SECONDS: float = 0.5
     
     # DeepSeek 配置
     DEEPSEEK_API_KEY: str = ""

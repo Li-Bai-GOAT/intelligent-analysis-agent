@@ -7,6 +7,7 @@ KunCode SSE Streaming Router
 """
 
 import asyncio
+import json
 import logging
 import os
 from typing import Optional, List
@@ -17,6 +18,28 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["kuncode"])
+
+
+def _kuncode_result_event(
+    *,
+    success: bool,
+    exit_code: int | None = None,
+    error_code: str | None = None,
+) -> str:
+    """Emit a machine-readable terminal result before the SSE sentinel.
+
+    KunCode can recover from a failed internal shell/script attempt and still
+    exit successfully.  The caller must therefore receive the process result
+    separately from the human-readable transcript instead of inferring it from
+    every historical ``Traceback`` in that transcript.
+    """
+    payload = {
+        "event": "kuncode_result",
+        "success": success,
+        "exit_code": exit_code,
+        "error_code": error_code,
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _normalize_model_name(model: Optional[str]) -> Optional[str]:
@@ -125,7 +148,11 @@ async def _stream_kuncode_output(cmd: List[str]):
                     "and was stopped.\n"
                 )
                 yield f"data: {json.dumps(message)}\n\n"
-                yield f"data: [ERROR] {message.strip()}\n\n"
+                yield _kuncode_result_event(
+                    success=False,
+                    error_code="KUNCODE_IDLE_TIMEOUT",
+                )
+                yield "data: [DONE]\n\n"
                 return
             if not chunk:
                 # 处理解码器中剩余的字节
@@ -144,15 +171,27 @@ async def _stream_kuncode_output(cmd: List[str]):
         if return_code != 0:
             message = f"\n[ERROR] KunCode exited with code {return_code}.\n"
             yield f"data: {json.dumps(message)}\n\n"
-            yield f"data: [ERROR] {message.strip()}\n\n"
+            yield _kuncode_result_event(
+                success=False,
+                exit_code=return_code,
+                error_code="KUNCODE_NONZERO_EXIT",
+            )
+            yield "data: [DONE]\n\n"
             return
-        
+
+        yield _kuncode_result_event(success=True, exit_code=return_code)
         # 发送完成标记
         yield "data: [DONE]\n\n"
         
     except Exception as e:
         logger.exception("KunCode execution failed")
-        yield f"data: [ERROR] {str(e)}\n\n"
+        message = f"[ERROR] KunCode execution failed: {str(e)}"
+        yield f"data: {json.dumps(message)}\n\n"
+        yield _kuncode_result_event(
+            success=False,
+            error_code="KUNCODE_PROCESS_ERROR",
+        )
+        yield "data: [DONE]\n\n"
 
 
 @router.post("/run_kuncode")

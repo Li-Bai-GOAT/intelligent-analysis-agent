@@ -17,6 +17,12 @@ from app.api.deps import get_current_user
 from app.repositories.state_repo import StateRepository
 from app.repositories.session_repo import SessionRepository
 from app.config import settings
+from app.services.plan_state import (
+    PlanState,
+    normalize_plan_snapshot,
+    normalize_plan_state,
+    normalize_terminal_plan_state,
+)
 
 router = APIRouter(prefix="/plans", tags=["计划管理"])
 
@@ -28,7 +34,7 @@ class SubtaskSchema(BaseModel):
     name: str
     description: Optional[str] = None
     expected_outcome: Optional[str] = None
-    state: str = "todo"  # todo, in_progress, done, failed
+    state: PlanState = "todo"
 
 
 class PlanSchema(BaseModel):
@@ -36,7 +42,7 @@ class PlanSchema(BaseModel):
     name: str
     description: Optional[str] = None
     expected_outcome: Optional[str] = None
-    state: str = "todo"
+    state: PlanState = "todo"
     subtasks: List[SubtaskSchema] = []
 
 
@@ -45,7 +51,7 @@ class PlanUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     expected_outcome: Optional[str] = None
-    state: Optional[str] = None
+    state: Optional[PlanState] = None
     subtasks: Optional[List[SubtaskSchema]] = None
 
 
@@ -54,7 +60,7 @@ class SubtaskUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     expected_outcome: Optional[str] = None
-    state: Optional[str] = None
+    state: Optional[PlanState] = None
 
 
 # ==================== Helper Functions ====================
@@ -72,6 +78,17 @@ def extract_plan_from_state(state: dict) -> Optional[dict]:
         return None
     
     return current_plan
+
+
+def extract_last_finished_plan_from_state(state: dict) -> Optional[dict]:
+    """Return the terminal plan snapshot used for read-only display."""
+    if not state:
+        return None
+    plan_notebook_state = state.get("plan_notebook", {})
+    if not isinstance(plan_notebook_state, dict):
+        return None
+    last_finished_plan = plan_notebook_state.get("last_finished_plan")
+    return last_finished_plan if isinstance(last_finished_plan, dict) else None
 
 
 def update_plan_in_state(state: dict, plan_updates: dict) -> dict:
@@ -127,7 +144,7 @@ def _normalize_subtask(raw: dict | str) -> dict:
         "name": str(raw.get("name") or "未命名子任务"),
         "description": raw.get("description"),
         "expected_outcome": raw.get("expected_outcome"),
-        "state": str(raw.get("state") or "todo"),
+        "state": normalize_plan_state(raw.get("state")),
     }
 
 
@@ -164,8 +181,8 @@ async def reconstruct_plan_from_history(user_id: str, session_id: str) -> Option
             idx = arguments.get("subtask_idx")
             state = arguments.get("state")
             if isinstance(idx, int) and 0 <= idx < len(plan["subtasks"]) and state:
-                plan["subtasks"][idx]["state"] = str(state)
-                if str(state) == "in_progress":
+                plan["subtasks"][idx]["state"] = normalize_plan_state(state)
+                if plan["subtasks"][idx]["state"] == "in_progress":
                     plan["state"] = "in_progress"
         elif tool_name == "finish_subtask":
             idx = arguments.get("subtask_idx")
@@ -179,7 +196,7 @@ async def reconstruct_plan_from_history(user_id: str, session_id: str) -> Option
                     plan["subtasks"][next_idx]["state"] = "in_progress"
                     plan["state"] = "in_progress"
         elif tool_name == "finish_plan":
-            plan["state"] = str(arguments.get("state") or "done")
+            plan["state"] = normalize_terminal_plan_state(arguments.get("state"))
             outcome = arguments.get("outcome")
             if outcome:
                 plan["expected_outcome"] = str(outcome)
@@ -190,6 +207,7 @@ async def reconstruct_plan_from_history(user_id: str, session_id: str) -> Option
 
 
 def plan_to_schema(plan: dict) -> PlanSchema:
+    plan = normalize_plan_snapshot(plan)
     subtasks = []
     for st in plan.get("subtasks", []):
         subtasks.append(SubtaskSchema(
@@ -217,11 +235,11 @@ async def get_plan(session_id: str, user: User = Depends(get_current_user)):
 
     plan = extract_plan_from_state(state)
     if not plan:
+        plan = extract_last_finished_plan_from_state(state)
+    if not plan:
         plan = await reconstruct_plan_from_history(user_id, session_id)
         if not plan:
             return None
-        state.setdefault("plan_notebook", {})["current_plan"] = plan
-        await StateRepository.save(user_id, state, session_id)
 
     return plan_to_schema(plan)
 

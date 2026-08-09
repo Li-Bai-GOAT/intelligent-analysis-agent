@@ -16,7 +16,7 @@ import {
   Wrench,
 } from 'lucide-react'
 import { useSessionStore } from '../../stores/session'
-import type { ToolCall } from '../../types'
+import type { ToolCall, ToolRuntimeStage } from '../../types'
 
 type ToolStatus = 'running' | 'success' | 'error'
 type ToolGroup = 'kuncode' | 'sandbox' | 'builtin' | 'interaction'
@@ -43,6 +43,11 @@ interface TerminalEntry {
   output: string
   status: ToolStatus
   internalCalls: InternalCall[]
+  stage?: ToolRuntimeStage
+  stageMessage?: string
+  attemptIndex?: number
+  exitCode?: number
+  errorCode?: string
 }
 
 interface InternalCall {
@@ -123,26 +128,30 @@ function stripAnsi(value: string): string {
     .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
 }
 
+function stripKuncodeControlMarkers(value: string): string {
+  return value.replace(/\s*\[\[DATAAGENT_KUNCODE_OUTCOME:\{[\s\S]*?\}\]\]/g, '').trimEnd()
+}
+
 function parseOutput(raw?: string): string {
   if (!raw) return ''
   const parsed = safeJsonParse(raw)
   if (Array.isArray(parsed)) {
-    return stripAnsi(parsed.map((item) => {
+    return stripKuncodeControlMarkers(stripAnsi(parsed.map((item) => {
       const record = asRecord(item)
       if (!record) return ''
       if (record.type === 'text') return toDisplayString(record.text)
       if ('content' in record) return toDisplayString(record.content)
       return ''
-    }).join('')).trim()
+    }).join('')).trim())
   }
-  if (typeof parsed === 'string') return stripAnsi(parsed)
+  if (typeof parsed === 'string') return stripKuncodeControlMarkers(stripAnsi(parsed))
   const record = asRecord(parsed)
   if (record) {
-    if (typeof record.text === 'string') return stripAnsi(record.text)
-    if (typeof record.output === 'string') return stripAnsi(record.output)
-    if (typeof record.content === 'string') return stripAnsi(record.content)
+    if (typeof record.text === 'string') return stripKuncodeControlMarkers(stripAnsi(record.text))
+    if (typeof record.output === 'string') return stripKuncodeControlMarkers(stripAnsi(record.output))
+    if (typeof record.content === 'string') return stripKuncodeControlMarkers(stripAnsi(record.content))
   }
-  return stripAnsi(raw)
+  return stripKuncodeControlMarkers(stripAnsi(raw))
 }
 
 function getStatus(output: string, result?: string, executionStatus?: ToolCall['execution_status']): ToolStatus {
@@ -187,6 +196,7 @@ function parseInput(toolName: string, rawInput: string): ParsedInput {
         { label: 'Agent', value: toDisplayString(record.agent || 'default') },
         { label: 'Model', value: toDisplayString(record.model || 'default') },
         { label: 'Continue', value: record.continue_session ? 'yes' : 'no' },
+        { label: '环境', value: 'Debian Linux · /workspace' },
       ]
       const files = Array.isArray(record.files) ? record.files.map(String).join(', ') : ''
       if (files) fields.push({ label: 'Files', value: files })
@@ -351,6 +361,23 @@ function statusLabel(status: ToolStatus): string {
   return 'DONE'
 }
 
+function stageLabel(stage?: ToolRuntimeStage): string {
+  switch (stage) {
+    case 'sandbox_preparing': return '正在准备隔离执行环境'
+    case 'model_processing': return 'KunCode 正在分析任务'
+    case 'dependency_checking': return '正在检查任务依赖'
+    case 'dependency_installing': return '正在安装任务所需依赖'
+    case 'file_generating': return '正在生成文件'
+    case 'repairing': return '执行出现问题，正在自动修复并重试'
+    case 'validating': return '正在验证输出结果'
+    case 'finalizing': return '正在整理并交付结果'
+    case 'completed': return '已完成'
+    case 'failed': return '执行失败'
+    case 'cancelled': return '已取消'
+    default: return ''
+  }
+}
+
 function languageLabel(lang: ParsedInput['lang']): string {
   if (lang === 'python') return 'python'
   if (lang === 'bash') return 'shell'
@@ -460,6 +487,11 @@ export function TerminalPanel() {
           output,
           status,
           internalCalls: tool.name === 'run_kuncode' ? extractInternalCalls(output) : [],
+          stage: tool.stage,
+          stageMessage: tool.stage_message,
+          attemptIndex: tool.attempt_index,
+          exitCode: tool.exit_code,
+          errorCode: tool.error_code,
         })
       }
     }
@@ -528,9 +560,18 @@ export function TerminalPanel() {
                         </span>
                         {entry.status === 'success' && <CheckCircle2 size={12} className="text-[#7ee787]" />}
                         {entry.status === 'error' && <AlertCircle size={12} className="text-[#ff6b6b]" />}
-                      </div>
-                      <div className="mt-1 truncate text-[11px] text-[#aeb9cc]">{entry.input.summary}</div>
-                    </div>
+                       </div>
+                       <div className="mt-1 truncate text-[11px] text-[#aeb9cc]">{entry.input.summary}</div>
+                       {(entry.stageMessage || stageLabel(entry.stage)) && (
+                         <div className={`mt-1.5 flex items-center gap-1.5 text-[11px] ${entry.status === 'error' ? 'text-[#ffb4b4]' : entry.status === 'success' ? 'text-[#9ee7b0]' : 'text-[#f6c56a]'}`}>
+                           {entry.status === 'running' && <Loader2 size={11} className="animate-spin" />}
+                           <span>{entry.stageMessage || stageLabel(entry.stage)}</span>
+                           {entry.attemptIndex && entry.stage === 'repairing' && <span className="text-[#8e9bb0]">第 {entry.attemptIndex} 次尝试</span>}
+                           {typeof entry.exitCode === 'number' && <span className="text-[#8e9bb0]">退出码 {entry.exitCode}</span>}
+                           {entry.errorCode && <span className="text-[#8e9bb0]">{entry.errorCode}</span>}
+                         </div>
+                       )}
+                     </div>
                     {entry.status === 'running' && <Loader2 size={14} className="mt-0.5 animate-spin text-[#f6b44b]" />}
                   </div>
                   <EntryDetails entry={entry} />

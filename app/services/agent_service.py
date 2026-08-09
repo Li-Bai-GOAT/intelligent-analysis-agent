@@ -11,8 +11,9 @@ import asyncio
 import logging
 import os
 import re
+import time
 from pathlib import Path
-from typing import Optional, AsyncGenerator, Dict, Any, List
+from typing import Optional, AsyncGenerator, Dict, Any, List, Literal
 from datetime import datetime, timezone
 
 
@@ -85,6 +86,27 @@ MODEL_SPECIAL_TOKENS = [
     "<｜end▁of▁thinking｜>",
     "<|end_of_thinking|>",
 ]
+KUNCODE_OUTCOME_MARKER_PREFIX = "[[DATAAGENT_KUNCODE_OUTCOME:"
+KUNCODE_OUTCOME_MARKER_SUFFIX = "]]"
+KUNCODE_OUTCOME_MARKER_PATTERN = re.compile(
+    re.escape(KUNCODE_OUTCOME_MARKER_PREFIX)
+    + r"(?P<payload>\{.*?\})"
+    + re.escape(KUNCODE_OUTCOME_MARKER_SUFFIX),
+    re.DOTALL,
+)
+KUNCODE_STAGE_MESSAGES = {
+    "sandbox_preparing": "正在准备隔离执行环境",
+    "model_processing": "KunCode 正在分析任务",
+    "dependency_checking": "正在检查任务依赖",
+    "dependency_installing": "正在安装任务所需依赖",
+    "file_generating": "正在生成文件",
+    "repairing": "执行出现问题，正在自动修复并重试",
+    "validating": "正在验证输出结果",
+    "finalizing": "正在整理并交付结果",
+    "completed": "已完成",
+    "failed": "执行失败",
+    "cancelled": "已取消",
+}
 
 def filter_model_tokens(text: str) -> str:
     """过滤模型输出中的特殊标记"""
@@ -93,6 +115,153 @@ def filter_model_tokens(text: str) -> str:
     for token in MODEL_SPECIAL_TOKENS:
         text = text.replace(token, "")
     return text
+
+
+def _flatten_tool_output(value: Any) -> str:
+    """Extract display text from AgentScope and persisted tool output shapes."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return value
+        if isinstance(parsed, (list, dict)):
+            return _flatten_tool_output(parsed)
+        return value
+    if isinstance(value, list):
+        return "".join(_flatten_tool_output(item) for item in value)
+    if isinstance(value, dict):
+        for field in ("text", "output", "content"):
+            if field in value:
+                return _flatten_tool_output(value[field])
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _normalize_kuncode_outcome(value: Any) -> dict[str, Any] | None:
+    """Validate terminal metadata recovered from the sandbox stream."""
+    if not isinstance(value, dict) or "success" not in value:
+        return None
+    exit_code = value.get("exit_code")
+    if isinstance(exit_code, bool):
+        exit_code = None
+    elif exit_code is not None:
+        try:
+            exit_code = int(exit_code)
+        except (TypeError, ValueError):
+            exit_code = None
+    return {
+        "success": bool(value.get("success")),
+        "cancelled": bool(value.get("cancelled")),
+        "exit_code": exit_code,
+        "error_code": str(value["error_code"]) if value.get("error_code") else None,
+    }
+
+
+def _split_kuncode_outcome_marker(output: str) -> tuple[str, dict[str, Any] | None]:
+    """Remove the adapter-only metadata marker before it reaches the terminal."""
+    matches = list(KUNCODE_OUTCOME_MARKER_PATTERN.finditer(output or ""))
+    if not matches:
+        return output, None
+    marker = matches[-1]
+    try:
+        outcome = _normalize_kuncode_outcome(json.loads(marker.group("payload")))
+    except json.JSONDecodeError:
+        outcome = None
+    clean = (output[:marker.start()] + output[marker.end():]).rstrip()
+    return clean, outcome
+
+
+def _encode_kuncode_outcome_marker(outcome: dict[str, Any]) -> str:
+    """Persist the structured terminal outcome through legacy text storage."""
+    normalized = _normalize_kuncode_outcome(outcome)
+    if normalized is None:
+        return ""
+    payload = {
+        "success": normalized["success"],
+        "cancelled": normalized["cancelled"],
+        "exit_code": normalized["exit_code"],
+        "error_code": normalized["error_code"],
+    }
+    return (
+        f"\n{KUNCODE_OUTCOME_MARKER_PREFIX}"
+        f"{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
+        f"{KUNCODE_OUTCOME_MARKER_SUFFIX}"
+    )
+
+
+def _extract_tool_response_outcome(response: Any) -> dict[str, Any] | None:
+    """Read native ToolResponse metadata, falling back to the text marker."""
+    outcome = _normalize_kuncode_outcome(getattr(response, "metadata", None))
+    if outcome is not None:
+        return outcome
+    _, marker_outcome = _split_kuncode_outcome_marker(_extract_tool_response_text(response))
+    return marker_outcome
+
+
+def _detect_kuncode_stage(output: str) -> tuple[str, int | None]:
+    """Classify a real KunCode transcript into one user-visible runtime stage."""
+    lowered = (output or "").lower()
+    error_index = max(
+        lowered.rfind("traceback"),
+        lowered.rfind("[error]"),
+        lowered.rfind("exception"),
+    )
+    retry_index = max(
+        lowered.rfind("retry"),
+        lowered.rfind("re-run"),
+        lowered.rfind("rerun"),
+        lowered.rfind("fixed"),
+        lowered.rfind("fixing"),
+        lowered.rfind("edit"),
+    )
+    stage_markers = {
+        "dependency_checking": (
+            "resolving dependencies",
+            "checking dependencies",
+            "dependency resolution",
+        ),
+        "dependency_installing": (
+            "downloaded and extracted",
+            "installing dependency",
+            "pip install",
+            "npm install",
+            "pnpm install",
+            "apt-get install",
+            "uv sync",
+        ),
+        "file_generating": (
+            "write ",
+            "wrote ",
+            "created /workspace",
+            "generated /workspace",
+            "exported ",
+            "saving file",
+        ),
+        "validating": (
+            "validat",
+            "verify",
+            "核对",
+            "检查输出",
+        ),
+    }
+    stage_indexes = {
+        stage: max(lowered.rfind(marker) for marker in markers)
+        for stage, markers in stage_markers.items()
+    }
+    latest_stage = max(stage_indexes, key=stage_indexes.get)
+    latest_stage_index = stage_indexes[latest_stage]
+
+    # Once a command has errored, an earlier dependency message must not keep
+    # overwriting the more relevant repair state in a cumulative transcript.
+    if error_index > latest_stage_index and retry_index <= error_index:
+        return "model_processing", None
+    if error_index >= 0 and retry_index > error_index and retry_index >= latest_stage_index:
+        failed_attempts = lowered.count("traceback") or lowered.count("[error]")
+        attempts = max(1, failed_attempts) + 1
+        return "repairing", attempts
+    return (latest_stage, None) if latest_stage_index >= 0 else ("model_processing", None)
 
 
 def _extract_tool_response_text(response: Any) -> str:
@@ -162,26 +331,60 @@ def _build_terminal_tool_results(
     ]
 
 
-def _build_streamed_tool_result(tool_id: str, output: Any) -> dict:
-    """Normalize AgentScope tool outputs into the terminal SSE contract."""
-    if isinstance(output, str):
-        result_text = output
-    elif output is None:
-        result_text = ""
-    else:
-        result_text = json.dumps(output, ensure_ascii=False)
+def _build_streamed_tool_result(
+    tool_id: str,
+    output: Any,
+    *,
+    outcome: dict[str, Any] | None = None,
+    tool_name: str | None = None,
+) -> dict:
+    """Normalize a final tool response into the terminal SSE contract.
 
-    is_error = _tool_output_failed(result_text)
-    return {
+    A real sandbox result is authoritative.  Text heuristics remain only for
+    old persisted records that do not have the structured terminal metadata.
+    """
+    result_text, marker_outcome = _split_kuncode_outcome_marker(
+        _flatten_tool_output(output),
+    )
+    terminal_outcome = _normalize_kuncode_outcome(outcome) or marker_outcome
+    if terminal_outcome is not None:
+        if terminal_outcome["cancelled"]:
+            execution_status = "cancelled"
+        elif terminal_outcome["success"]:
+            execution_status = "completed"
+        else:
+            execution_status = "failed"
+    else:
+        execution_status = "failed" if _tool_output_failed(result_text) else "completed"
+
+    event = {
         "type": "tool_result",
         "content": result_text,
         "tool_id": tool_id,
-        "phase": "failed" if is_error else "completed",
-        "execution_status": "failed" if is_error else "completed",
+        "phase": execution_status,
+        "execution_status": execution_status,
     }
+    if terminal_outcome is not None:
+        event.update(terminal_outcome)
+    if tool_name == "run_kuncode":
+        stage = {
+            "completed": "completed",
+            "failed": "failed",
+            "cancelled": "cancelled",
+        }[execution_status]
+        event.update({
+            "stage": stage,
+            "message": KUNCODE_STAGE_MESSAGES[stage],
+        })
+    return event
 
 
-def _build_streamed_tool_progress(tool_id: str, output: Any) -> dict:
+def _build_streamed_tool_progress(
+    tool_id: str,
+    output: Any,
+    *,
+    tool_name: str | None = None,
+) -> dict:
     """Normalize a non-terminal streamed tool chunk for the terminal UI.
 
     AgentScope emits every chunk of a streaming tool as a ``tool_result``
@@ -189,20 +392,45 @@ def _build_streamed_tool_progress(tool_id: str, output: Any) -> dict:
     Keeping intermediate chunks explicitly running prevents the UI from
     treating a partial KunCode/sandbox output as a completed operation.
     """
-    if isinstance(output, str):
-        result_text = output
-    elif output is None:
-        result_text = ""
-    else:
-        result_text = json.dumps(output, ensure_ascii=False)
-
-    return {
-        "type": "tool_result",
+    result_text, _ = _split_kuncode_outcome_marker(_flatten_tool_output(output))
+    event = {
+        "type": "tool_progress",
         "content": result_text,
         "tool_id": tool_id,
         "phase": "progress",
         "execution_status": "running",
     }
+    if tool_name == "run_kuncode":
+        stage, attempt_index = _detect_kuncode_stage(result_text)
+        event["stage"] = stage
+        event["message"] = KUNCODE_STAGE_MESSAGES[stage]
+        if attempt_index is not None:
+            event["attempt_index"] = attempt_index
+    return event
+
+
+def _should_emit_tool_progress(
+    event: dict,
+    previous: dict[str, tuple[int, str | None, float]],
+) -> bool:
+    """Throttle cumulative tool chunks without delaying stage transitions."""
+    tool_id = str(event.get("tool_id") or "")
+    content_length = len(str(event.get("content") or ""))
+    stage = event.get("stage") if isinstance(event.get("stage"), str) else None
+    now = time.monotonic()
+    prior = previous.get(tool_id)
+    if prior is None:
+        previous[tool_id] = (content_length, stage, now)
+        return True
+
+    prior_length, prior_stage, prior_time = prior
+    changed = content_length < prior_length or content_length - prior_length >= 2048
+    stage_changed = stage != prior_stage
+    elapsed = now - prior_time >= 1.5
+    if changed or stage_changed or elapsed:
+        previous[tool_id] = (content_length, stage, now)
+        return True
+    return False
 
 
 def _get_tool_result_id(block: dict[str, Any]) -> str:
@@ -216,26 +444,17 @@ def _get_tool_result_id(block: dict[str, Any]) -> str:
     return str(block.get("tool_use_id") or block.get("id") or "")
 
 
-def _tool_output_failed(output: str) -> bool:
+def _tool_output_failed(output: str, outcome: dict[str, Any] | None = None) -> bool:
     """Judge the final tool outcome without treating recovered errors as fatal."""
-    rendered = output
-    try:
-        parsed = json.loads(output)
-        if isinstance(parsed, list):
-            rendered = "".join(
-                str(item.get("text") or item.get("content") or "")
-                for item in parsed
-                if isinstance(item, dict)
-            )
-        elif isinstance(parsed, dict):
-            rendered = str(
-                parsed.get("text")
-                or parsed.get("output")
-                or parsed.get("content")
-                or output
-            )
-    except (TypeError, json.JSONDecodeError):
-        pass
+    terminal_outcome = _normalize_kuncode_outcome(outcome)
+    if terminal_outcome is not None:
+        return not terminal_outcome["success"] and not terminal_outcome["cancelled"]
+
+    rendered, marker_outcome = _split_kuncode_outcome_marker(
+        _flatten_tool_output(output),
+    )
+    if marker_outcome is not None:
+        return not marker_outcome["success"] and not marker_outcome["cancelled"]
 
     lowered = rendered.lower().strip()
     if not lowered:
@@ -304,7 +523,11 @@ def _extract_persisted_tool_results(
             ):
                 continue
             recovered.append(
-                _build_streamed_tool_result(tool_id, data.get("output"))
+                _build_streamed_tool_result(
+                    tool_id,
+                    data.get("output"),
+                    tool_name=pending_tool_calls.get(tool_id),
+                )
             )
             recovered_ids.add(tool_id)
 
@@ -320,6 +543,10 @@ from agentscope.tool import Toolkit, ToolResponse
 from agentscope.pipeline import stream_printing_messages
 
 from app.services.model_factory import ModelFactory
+from app.services.plan_state import (
+    normalize_plan_notebook_state,
+    normalize_terminal_plan_state,
+)
 
 from agentscope_runtime.engine.services.sandbox import SandboxService
 from app.services.compressed_memory import CompressedSessionMemory
@@ -551,7 +778,11 @@ class ConfirmedPlanNotebook(PlanNotebook):
             subtasks=subtasks,
         )
 
-    async def finish_plan(self, state: str, outcome: str) -> ToolResponse:
+    async def finish_plan(
+        self,
+        state: Literal["done", "abandoned"],
+        outcome: str,
+    ) -> ToolResponse:
         """Retain the terminal plan snapshot while AgentScope clears it.
 
         AgentScope intentionally sets ``current_plan`` to ``None`` before it
@@ -559,10 +790,11 @@ class ConfirmedPlanNotebook(PlanNotebook):
         final ``done`` transition and leave the persisted right-hand panel in
         ``in_progress`` forever.
         """
+        normalized_state = normalize_terminal_plan_state(state)
         if self.current_plan is not None:
-            self.current_plan.finish(state, outcome)
+            self.current_plan.finish(normalized_state, outcome)
             self.last_finished_plan = self.current_plan.model_copy(deep=True)
-        return await super().finish_plan(state, outcome)
+        return await super().finish_plan(normalized_state, outcome)
 
 
 def create_ask_user_tool(session_id: str, hitl_queue):
@@ -941,7 +1173,7 @@ class AgentService:
         return merged
 
     @classmethod
-    def _restore_agent_state(cls, agent, state: Optional[dict]) -> None:
+    def _restore_agent_state(cls, agent, state: Optional[dict]) -> dict | None:
         """Restore persisted state without breaking on older partial records.
 
         Plan updates can be persisted before an AgentScope turn reaches its
@@ -949,8 +1181,14 @@ class AgentService:
         as ``memory``; strict loading would make the next user message fail.
         """
         if isinstance(state, dict) and state:
-            complete_state = cls._merge_persisted_state(agent.state_dict(), state)
+            normalized_state = normalize_plan_notebook_state(state)
+            complete_state = cls._merge_persisted_state(
+                agent.state_dict(),
+                normalized_state,
+            )
             agent.load_state_dict(complete_state, strict=False)
+            return normalized_state
+        return state
     
     async def start(self) -> None:
         """启动服务"""
@@ -1295,7 +1533,8 @@ class AgentService:
             def plan_change_hook(notebook: PlanNotebook, plan) -> None:
                 """计划变更钩子 - 同步更新前端与持久化状态"""
                 nonlocal latest_plan_snapshot
-                if plan is None:
+                plan_finished = plan is None
+                if plan_finished:
                     # AgentScope clears ``current_plan`` before invoking this
                     # hook on finish.  Our notebook preserves the completed
                     # object so the terminal state reaches both the stream
@@ -1321,7 +1560,12 @@ class AgentService:
                         state = await self.state_service.export_state(user_id, session_id)
                         if not state:
                             state = {}
-                        state.setdefault("plan_notebook", {})["current_plan"] = plan_data
+                        plan_state = state.setdefault("plan_notebook", {})
+                        if plan_finished:
+                            plan_state["current_plan"] = None
+                            plan_state["last_finished_plan"] = plan_data
+                        else:
+                            plan_state["current_plan"] = plan_data
                         await self.state_service.save_state(user_id, state, session_id)
                     except Exception as exc:
                         logger.warning(
@@ -1436,69 +1680,83 @@ class AgentService:
         else:
             logger.warning("Direct KunCode history skipped: session=%s not found", session_id)
 
-        yield {
+        tool_call_event = {
             "type": "tool_call",
             "content": "run_kuncode",
             "tool_id": tool_id,
             "input": tool_input,
         }
+        tool_call_event.update({
+            "stage": "sandbox_preparing",
+            "message": KUNCODE_STAGE_MESSAGES["sandbox_preparing"],
+        })
+        yield tool_call_event
 
         accumulated_output = ""
         final_message = ""
         generated_files: list[str] = []
         is_error = False
+        terminal_outcome: dict[str, Any] | None = None
+        emitted_progress: dict[str, tuple[int, str | None, float]] = {}
         try:
             async for response in sandbox.run_kuncode(prompt=prompt):
-                output = _extract_tool_response_text(response)
+                response_outcome = _extract_tool_response_outcome(response)
+                output, marker_outcome = _split_kuncode_outcome_marker(
+                    _extract_tool_response_text(response),
+                )
+                terminal_outcome = response_outcome or marker_outcome or terminal_outcome
                 if output and output != accumulated_output:
                     accumulated_output = output
-                    yield {
-                        "type": "tool_result",
-                        "content": accumulated_output,
-                        "tool_id": tool_id,
-                        "phase": "progress",
-                        "execution_status": "running",
-                    }
+                    progress_event = _build_streamed_tool_progress(
+                        tool_id,
+                        accumulated_output,
+                        tool_name="run_kuncode",
+                    )
+                    if _should_emit_tool_progress(progress_event, emitted_progress):
+                        yield progress_event
         except Exception as e:
-            accumulated_output = f"[ERROR] KunCode direct execution failed: {e}"
-            final_message = accumulated_output
-            is_error = True
-            logger.exception("Direct KunCode execution failed: session=%s", session_id)
-            yield {
-                "type": "tool_result",
-                "content": accumulated_output,
-                "tool_id": tool_id,
-                "phase": "failed",
-                "execution_status": "failed",
+            failure_output = f"[ERROR] KunCode direct execution failed: {e}"
+            accumulated_output = (
+                f"{accumulated_output}\n{failure_output}"
+                if accumulated_output
+                else failure_output
+            )
+            terminal_outcome = {
+                "success": False,
+                "exit_code": None,
+                "error_code": "KUNCODE_STREAM_INCOMPLETE",
             }
+            logger.exception("Direct KunCode execution failed: session=%s", session_id)
         else:
             if not accumulated_output.strip():
                 accumulated_output = "[ERROR] KunCode returned no output."
-                yield {
-                    "type": "tool_result",
-                    "content": accumulated_output,
-                    "tool_id": tool_id,
-                    "phase": "failed",
-                    "execution_status": "failed",
+                terminal_outcome = {
+                    "success": False,
+                    "exit_code": None,
+                    "error_code": "KUNCODE_EMPTY_OUTPUT",
                 }
 
-            is_error = "[ERROR]" in accumulated_output
-            generated_files = _extract_workspace_files(accumulated_output)
-            final_message = (
-                "KunCode 执行失败，请查看终端输出。"
-                if is_error
-                else _build_kuncode_completion_message(generated_files)
-            )
+        is_error = _tool_output_failed(accumulated_output, terminal_outcome)
+        terminal_outcome = terminal_outcome or {
+            "success": not is_error,
+            "exit_code": None,
+            "error_code": "KUNCODE_TEXT_FALLBACK" if is_error else None,
+        }
+        generated_files = _extract_workspace_files(accumulated_output)
+        final_message = (
+            "KunCode 执行失败，请查看终端输出。"
+            if is_error
+            else _build_kuncode_completion_message(generated_files)
+        )
 
         # The streaming chunks above are progress updates. Emit one explicit
         # final result so clients can stop the tool spinner deterministically.
-        yield {
-            "type": "tool_result",
-            "content": accumulated_output,
-            "tool_id": tool_id,
-            "phase": "failed" if is_error else "completed",
-            "execution_status": "failed" if is_error else "completed",
-        }
+        yield _build_streamed_tool_result(
+            tool_id,
+            accumulated_output,
+            outcome=terminal_outcome,
+            tool_name="run_kuncode",
+        )
 
         if db_session:
             output_message = {
@@ -1514,7 +1772,10 @@ class AgentService:
                             "call_id": tool_id,
                             "name": "run_kuncode",
                             "output": json.dumps(
-                                [{"type": "text", "text": accumulated_output}],
+                                [{
+                                    "type": "text",
+                                    "text": accumulated_output + _encode_kuncode_outcome_marker(terminal_outcome),
+                                }],
                                 ensure_ascii=False,
                             ),
                         },
@@ -1619,7 +1880,16 @@ class AgentService:
             
             # 恢复状态
             state = await self.state_service.export_state(user_id, session_id)
-            self._restore_agent_state(agent, state)
+            restored_state = self._restore_agent_state(agent, state)
+            if isinstance(restored_state, dict) and restored_state != state:
+                # Persist the compatibility migration before the model runs so
+                # the next ordinary message cannot hit the same legacy plan.
+                await self.state_service.save_state(
+                    user_id=user_id,
+                    session_id=session_id,
+                    state=restored_state,
+                )
+            state = restored_state
             
             # 修复未配对的 plugin_call（用户可能在上次中断后直接发送新消息）
             await self._repair_unpaired_plugin_calls(user_id, session_id)
@@ -1692,6 +1962,7 @@ class AgentService:
             last_text_content = ""
             sent_tool_ids = set()
             sent_tool_inputs = {}  # tool_id -> last_sent_input，用于检测 input 变化
+            emitted_progress: dict[str, tuple[int, str | None, float]] = {}
             
             try:
                 while not stream_done.is_set() or not stream_queue.empty():
@@ -1776,23 +2047,33 @@ class AgentService:
                                         tool_id = item.get("id", "")
                                         tool_name = item.get("name", "")
                                         tool_input = item.get("input", {})
-                                        # Providers may stream tool input incrementally. Re-emit only
-                                        # when arguments become more complete; the frontend updates the
-                                        # existing entry by tool_id instead of adding a duplicate.
+                                        # Providers can emit hundreds of cumulative tool-use chunks.
+                                        # Show the entry immediately, then issue at most one final
+                                        # update when the complete tool arguments are available.
                                         if tool_id:
                                             last_input = sent_tool_inputs.get(tool_id)
-                                            input_changed = tool_input and last_input != tool_input
-                                            if tool_id not in sent_tool_ids or input_changed:
+                                            input_finalized = (
+                                                is_last_chunk
+                                                and tool_input
+                                                and last_input != tool_input
+                                            )
+                                            if tool_id not in sent_tool_ids or input_finalized:
                                                 sent_tool_ids.add(tool_id)
                                                 sent_tool_inputs[tool_id] = tool_input
                                                 # 记录待处理的 tool_call
                                                 pending_tool_calls[tool_id] = tool_name
-                                                yield {
+                                                tool_event = {
                                                     "type": "tool_call",
                                                     "content": tool_name,
                                                     "tool_id": tool_id,
                                                     "input": tool_input,
                                                 }
+                                                if tool_name == "run_kuncode":
+                                                    tool_event.update({
+                                                        "stage": "sandbox_preparing",
+                                                        "message": KUNCODE_STAGE_MESSAGES["sandbox_preparing"],
+                                                    })
+                                                yield tool_event
                                     elif block_type == "tool_result":
                                         output = item.get("output", [])
                                         text_parts = [o.get("text", "") for o in output if isinstance(o, dict) and o.get("type") == "text"]
@@ -1803,20 +2084,31 @@ class AgentService:
                                         # earlier chunks should update its output while retaining
                                         # the running state in the terminal.
                                         if is_last_chunk:
-                                            pending_tool_calls.pop(tool_id, None)
-                                            yield _build_streamed_tool_result(tool_id, result_text)
+                                            tool_name = pending_tool_calls.pop(tool_id, None)
+                                            yield _build_streamed_tool_result(
+                                                tool_id,
+                                                result_text,
+                                                tool_name=tool_name,
+                                            )
                                         else:
-                                            yield _build_streamed_tool_progress(tool_id, result_text)
+                                            progress_event = _build_streamed_tool_progress(
+                                                tool_id,
+                                                result_text,
+                                                tool_name=pending_tool_calls.get(tool_id),
+                                            )
+                                            if _should_emit_tool_progress(progress_event, emitted_progress):
+                                                yield progress_event
                                     elif block_type == "data":
                                         # AgentScope stores plugin_call_output blocks in this
                                         # shape. A matching block is the real terminal result.
                                         data = item.get("data", {})
                                         tool_id = data.get("call_id", "") if isinstance(data, dict) else ""
                                         if tool_id and tool_id in pending_tool_calls:
-                                            pending_tool_calls.pop(tool_id, None)
+                                            tool_name = pending_tool_calls.pop(tool_id, None)
                                             yield _build_streamed_tool_result(
                                                 tool_id,
                                                 data.get("output"),
+                                                tool_name=tool_name,
                                             )
                                         else:
                                             yield {
@@ -1900,14 +2192,23 @@ class AgentService:
                 if isinstance(plan_snapshot_ref, dict)
                 else None
             )
-            # ``finish_plan`` clears AgentScope's current_plan. Keep the
-            # last hook snapshot in the session state so the terminal plan
-            # remains visible after a reload instead of being overwritten by
-            # the empty AgentScope notebook state below.
+            # ``finish_plan`` clears AgentScope's current_plan. Keep its
+            # snapshot separately for display/history; never restore a
+            # finished plan as an active plan on the next conversation turn.
             if latest_plan_snapshot is not None:
-                state_to_save.setdefault("plan_notebook", {})[
-                    "current_plan"
-                ] = latest_plan_snapshot
+                plan_state = state_to_save.setdefault("plan_notebook", {})
+                if plan_state.get("current_plan") is None:
+                    plan_state["last_finished_plan"] = latest_plan_snapshot
+            if isinstance(state, dict):
+                previous_finished_plan = (
+                    state.get("plan_notebook", {}).get("last_finished_plan")
+                    if isinstance(state.get("plan_notebook"), dict)
+                    else None
+                )
+                if previous_finished_plan and not state_to_save.get("plan_notebook", {}).get("last_finished_plan"):
+                    state_to_save.setdefault("plan_notebook", {})[
+                        "last_finished_plan"
+                    ] = previous_finished_plan
             await self.state_service.save_state(
                 user_id=user_id,
                 session_id=session_id,
@@ -2200,6 +2501,7 @@ class AgentService:
         event_type = event.get("type", "status")
         phase, execution_status = {
             "tool_call": ("started", "running"),
+            "tool_progress": ("progress", "running"),
             "tool_result": ("completed", "completed"),
             "error": ("failed", "failed"),
             "interrupted": ("cancelled", "cancelled"),

@@ -186,7 +186,10 @@ switch ($Action) {
             '--extension', (Join-Path $ProjectRoot 'data_analysis_sandbox.py'),
             '--extension', (Join-Path $ProjectRoot 'sandbox_proxy_extension.py')
         )
-        Start-ManagedService 'main' 8090 'http://127.0.0.1:8090/ready' $Python @(
+        # Use liveness here: /ready probes every external dependency and may
+        # briefly time out while Milvus or the sandbox manager is warming up.
+        # Dependency readiness is still reported by Show-Status below.
+        Start-ManagedService 'main' 8090 'http://127.0.0.1:8090/live' $Python @(
             '-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', '8090'
         )
         Show-Status

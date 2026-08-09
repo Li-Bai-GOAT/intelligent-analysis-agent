@@ -28,6 +28,28 @@ from datetime import datetime
 
 router = APIRouter(prefix="/files", tags=["文件管理"])
 
+# 工具在这些位置生成临时代码、日志或缓存；它们不属于默认交付物。
+_INTERNAL_WORKSPACE_DIRECTORIES = {"code", "scripts", "__pycache__"}
+_INTERNAL_WORKSPACE_SUFFIXES = {
+    ".py", ".pyc", ".pyo", ".ipynb", ".sh", ".bash", ".ps1",
+    ".js", ".ts", ".log", ".tmp",
+}
+
+
+def _is_internal_workspace_item(relative_path: str, *, is_directory: bool) -> bool:
+    """Keep execution artifacts out of the user-facing delivery surface."""
+    normalized = relative_path.replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    parts = [part.lower() for part in normalized.split("/") if part]
+    if any(part.startswith(".") for part in parts):
+        return True
+    if any(part in _INTERNAL_WORKSPACE_DIRECTORIES for part in parts[:-1]):
+        return True
+    if is_directory:
+        return parts[-1] in _INTERNAL_WORKSPACE_DIRECTORIES
+    return os.path.splitext(parts[-1])[1] in _INTERNAL_WORKSPACE_SUFFIXES
+
 
 def _is_within_workspace(target_path: str, mount_dir: str) -> bool:
     try:
@@ -197,6 +219,8 @@ def _scan_directory(path: str, relative_path: str = "", show_hidden: bool = Fals
             stat = entry.stat()
             
             if entry.is_file():
+                if _is_internal_workspace_item(item_path, is_directory=False):
+                    continue
                 items.append(SandboxFileItem(
                     name=entry.name,
                     path=item_path,
@@ -205,6 +229,8 @@ def _scan_directory(path: str, relative_path: str = "", show_hidden: bool = Fals
                     modified=datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 ))
             elif entry.is_dir():
+                if _is_internal_workspace_item(item_path, is_directory=True):
+                    continue
                 # 递归扫描子目录
                 children = _scan_directory(entry.path, item_path, show_hidden)
                 items.append(SandboxFileItem(
@@ -550,14 +576,23 @@ async def download_workspace_zip(
     try:
         with zipfile.ZipFile(temp_file, 'w', zipfile.ZIP_DEFLATED) as zf:
             for root, dirs, files in os.walk(mount_dir):
-                # 过滤隐藏目录
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                relative_root = os.path.relpath(root, mount_dir)
+                if relative_root == ".":
+                    relative_root = ""
+                # 过滤隐藏目录和执行临时目录，ZIP 默认只包含交付物。
+                dirs[:] = [
+                    directory
+                    for directory in dirs
+                    if not _is_internal_workspace_item(
+                        os.path.join(relative_root, directory) if relative_root else directory,
+                        is_directory=True,
+                    )
+                ]
                 for file in files:
-                    # 过滤隐藏文件
-                    if file.startswith('.'):
-                        continue
                     file_path = os.path.join(root, file)
                     arc_name = os.path.relpath(file_path, mount_dir)
+                    if _is_internal_workspace_item(arc_name, is_directory=False):
+                        continue
                     zf.write(file_path, arc_name)
         
         temp_file.close()

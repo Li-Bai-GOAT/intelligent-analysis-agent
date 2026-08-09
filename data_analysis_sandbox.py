@@ -19,10 +19,73 @@ KunCode Data Analysis Sandbox
 import os
 import re
 import asyncio
+import json
 import logging
 from pathlib import Path
-from typing import Optional, List, Generator, AsyncGenerator
+from typing import Any, Optional, List, Generator, AsyncGenerator
 logger = logging.getLogger(__name__)
+
+
+KUNCODE_RUNTIME_CONTEXT = """[DataAgent execution environment]
+You are running inside a Debian Linux Docker sandbox, not on the Windows host.
+Use POSIX/Bash commands and the /workspace working directory. Do not assume
+macOS or Windows paths. Write deliverable files under /workspace subdirectories
+and report workspace-relative paths to the user. Never execute generated code
+on the host machine.
+
+[Delivery and execution policy]
+For a file-generation request, deliver only the artifact(s) the user asked for.
+Put temporary scripts in /workspace/code (never /workspace/scripts), treat them
+as internal implementation details, and do not list them as deliverables. Put
+user-facing outputs in /workspace/results, /workspace/charts, or
+/workspace/reports. Before installing any dependency, check whether the needed
+package already exists. For a single-file request, use a focused generator and
+one targeted verification; do not dump exhaustive workbook contents or perform
+unrelated repeated checks after the requested artifact has validated."""
+KUNCODE_OUTCOME_MARKER_PREFIX = "[[DATAAGENT_KUNCODE_OUTCOME:"
+KUNCODE_OUTCOME_MARKER_SUFFIX = "]]"
+
+
+def _build_kuncode_runtime_prompt(prompt: str) -> str:
+    """Add deterministic sandbox facts without changing the user-visible task."""
+    normalized = str(prompt or "").strip()
+    if KUNCODE_RUNTIME_CONTEXT in normalized:
+        return normalized
+    return f"{KUNCODE_RUNTIME_CONTEXT}\n\n[User task]\n{normalized}"
+
+
+def _normalize_kuncode_outcome(value: Any) -> dict[str, Any] | None:
+    """Validate only the small terminal outcome contract used by this adapter."""
+    if not isinstance(value, dict) or value.get("event") != "kuncode_result":
+        return None
+    exit_code = value.get("exit_code")
+    if isinstance(exit_code, bool):
+        exit_code = None
+    elif exit_code is not None:
+        try:
+            exit_code = int(exit_code)
+        except (TypeError, ValueError):
+            exit_code = None
+    error_code = value.get("error_code")
+    return {
+        "success": bool(value.get("success")),
+        "exit_code": exit_code,
+        "error_code": str(error_code) if error_code else None,
+    }
+
+
+def _encode_kuncode_outcome_marker(outcome: dict[str, Any]) -> str:
+    """Keep terminal metadata available through AgentScope's text-only block."""
+    payload = {
+        "success": bool(outcome.get("success")),
+        "exit_code": outcome.get("exit_code"),
+        "error_code": outcome.get("error_code"),
+    }
+    return (
+        f"\n{KUNCODE_OUTCOME_MARKER_PREFIX}"
+        f"{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
+        f"{KUNCODE_OUTCOME_MARKER_SUFFIX}"
+    )
 
 # ==================== 加载环境变量 ====================
 # 注意：runtime-sandbox-server 的 extension 加载顺序在 config 之前，
@@ -119,7 +182,7 @@ class StreamingClient:
         url: str,
         json_data: dict,
         headers: Optional[dict] = None,
-    ) -> Generator[str, None, None]:
+    ) -> Generator[Any, None, None]:
 
         """
         同步 SSE 流式请求（真正流式，立即输出）
@@ -168,7 +231,7 @@ class StreamingClient:
         url: str,
         json_data: dict,
         headers: Optional[dict] = None,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Any, None]:
 
         """
         异步 SSE 流式请求（真正流式，立即输出）
@@ -251,6 +314,21 @@ def _append_kuncode_failure_hint(output: str) -> str:
         "Check the configured agent, model, provider API key, and sandbox KunCode config."
     )
     return output if hint in output else output + hint
+
+
+def _finalize_kuncode_outcome(
+    output: str,
+    outcome: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a structured terminal outcome for both new and old sandboxes."""
+    if outcome is not None:
+        return outcome
+    failed = _is_kuncode_failure(output)
+    return {
+        "success": not failed,
+        "exit_code": None,
+        "error_code": "KUNCODE_STREAM_ERROR" if failed else None,
+    }
 
 
 def _normalize_kuncode_agent(agent: Optional[str]) -> Optional[str]:
@@ -424,7 +502,7 @@ class DataAnalysisSandbox(Sandbox):
         from agentscope.tool import ToolResponse
         # 构建请求参数
         request_data = {
-            "prompt": prompt,
+            "prompt": _build_kuncode_runtime_prompt(prompt),
             "agent": _normalize_kuncode_agent(agent),
             "model": model,
             "files": files,
@@ -435,10 +513,19 @@ class DataAnalysisSandbox(Sandbox):
         url = self._get_sse_url()
         headers = self._get_auth_headers()
         accumulated_output = ""
-        has_error = False
+        terminal_outcome: dict[str, Any] | None = None
         try:
             # 使用异步 SSE 流，不阻塞事件循环
-            async for line in StreamingClient.stream_sse_async(url, request_data, headers):
+            async for event in StreamingClient.stream_sse_async(url, request_data, headers):
+                structured_outcome = _normalize_kuncode_outcome(event)
+                if structured_outcome is not None:
+                    terminal_outcome = structured_outcome
+                    continue
+                line = (
+                    event
+                    if isinstance(event, str)
+                    else json.dumps(event, ensure_ascii=False)
+                )
                 # 实时打印到终端
                 print(line, end='', flush=True)
                 accumulated_output += line
@@ -454,16 +541,26 @@ class DataAnalysisSandbox(Sandbox):
             raise
         except Exception as e:
             logger.exception("KunCode SSE streaming failed")
-            error_msg = f"\n[ERROR] {str(e)}"
+            error_msg = f"\n[ERROR] KunCode stream request failed: {str(e)}"
             accumulated_output += error_msg
-            has_error = True
-        if _is_kuncode_failure(accumulated_output):
+            terminal_outcome = {
+                "success": False,
+                "exit_code": None,
+                "error_code": "KUNCODE_STREAM_INCOMPLETE",
+            }
+        terminal_outcome = _finalize_kuncode_outcome(
+            accumulated_output,
+            terminal_outcome,
+        )
+        if not terminal_outcome["success"]:
             accumulated_output = _append_kuncode_failure_hint(accumulated_output)
-            has_error = True
         # 最后一个 chunk 标记 is_last=True，包含完整累积内容
         yield ToolResponse(
-            content=[{"type": "text", "text": accumulated_output}],
-            metadata={"success": not has_error},
+            content=[{
+                "type": "text",
+                "text": accumulated_output + _encode_kuncode_outcome_marker(terminal_outcome),
+            }],
+            metadata=terminal_outcome,
             stream=True,
             is_last=True,
         )
@@ -652,7 +749,7 @@ class DataAnalysisSandboxAsync(SandboxAsync):
         from agentscope.tool import ToolResponse
         # 构建请求参数
         request_data = {
-            "prompt": prompt,
+            "prompt": _build_kuncode_runtime_prompt(prompt),
             "agent": _normalize_kuncode_agent(agent),
             "model": model,
             "files": files,
@@ -663,8 +760,18 @@ class DataAnalysisSandboxAsync(SandboxAsync):
         url = self._get_sse_url()
         headers = self._get_auth_headers()
         accumulated_output = ""
+        terminal_outcome: dict[str, Any] | None = None
         try:
-            async for line in StreamingClient.stream_sse_async(url, request_data, headers):
+            async for event in StreamingClient.stream_sse_async(url, request_data, headers):
+                structured_outcome = _normalize_kuncode_outcome(event)
+                if structured_outcome is not None:
+                    terminal_outcome = structured_outcome
+                    continue
+                line = (
+                    event
+                    if isinstance(event, str)
+                    else json.dumps(event, ensure_ascii=False)
+                )
                 # 实时打印到终端
                 print(line, end='', flush=True)
                 accumulated_output += line
@@ -676,14 +783,25 @@ class DataAnalysisSandboxAsync(SandboxAsync):
                 )
         except Exception as e:
             logger.exception("KunCode SSE streaming failed")
-            accumulated_output += f"\n[ERROR] {str(e)}"
-        has_error = _is_kuncode_failure(accumulated_output)
-        if has_error:
+            accumulated_output += f"\n[ERROR] KunCode stream request failed: {str(e)}"
+            terminal_outcome = {
+                "success": False,
+                "exit_code": None,
+                "error_code": "KUNCODE_STREAM_INCOMPLETE",
+            }
+        terminal_outcome = _finalize_kuncode_outcome(
+            accumulated_output,
+            terminal_outcome,
+        )
+        if not terminal_outcome["success"]:
             accumulated_output = _append_kuncode_failure_hint(accumulated_output)
         # 最终 yield
         yield ToolResponse(
-            content=[{"type": "text", "text": accumulated_output}],
-            metadata={"success": not has_error},
+            content=[{
+                "type": "text",
+                "text": accumulated_output + _encode_kuncode_outcome_marker(terminal_outcome),
+            }],
+            metadata=terminal_outcome,
             stream=True,
             is_last=True,
         )

@@ -7,9 +7,11 @@
 
 import re
 import logging
-from typing import Literal, Optional
+import asyncio
+from typing import Any, Literal, Optional
 from dataclasses import dataclass
 
+import httpx
 from agentscope.model import OpenAIChatModel, AnthropicChatModel
 from agentscope.token import TokenCounterBase, OpenAITokenCounter
 from agentscope.formatter import FormatterBase
@@ -17,6 +19,87 @@ from agentscope.formatter import FormatterBase
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class RetryingStreamingModel:
+    """Retry a provider stream that disconnects before AgentScope can act.
+
+    Retrying occurs while the model is still producing a reasoning response.
+    ReActAgent executes tools only after that response stream finishes, so a
+    retry cannot repeat a sandbox/KunCode side effect.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        *,
+        max_retries: int = 2,
+        retry_delay_seconds: float = 0.5,
+    ) -> None:
+        self._model = model
+        self.max_retries = max(0, max_retries)
+        self.retry_delay_seconds = max(0.0, retry_delay_seconds)
+
+    @property
+    def stream(self) -> bool:
+        return bool(getattr(self._model, "stream", False))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        response = await self._create_response_with_retry(args, kwargs)
+        if not self.stream or not hasattr(response, "__aiter__"):
+            return response
+        return self._stream_with_retry(response, args, kwargs)
+
+    async def _create_response_with_retry(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        attempt = 0
+        while True:
+            try:
+                return await self._model(*args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as error:
+                if attempt >= self.max_retries:
+                    raise
+                attempt += 1
+                logger.warning(
+                    "Model request could not establish a stream; retrying: attempt=%s/%s error=%s",
+                    attempt,
+                    self.max_retries,
+                    error,
+                )
+                if self.retry_delay_seconds:
+                    await asyncio.sleep(self.retry_delay_seconds * attempt)
+
+    async def _stream_with_retry(self, response: Any, args: tuple[Any, ...], kwargs: dict[str, Any]):
+        attempt = 0
+        current_response = response
+        while True:
+            try:
+                async for chunk in current_response:
+                    yield chunk
+                return
+            except asyncio.CancelledError:
+                raise
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as error:
+                if attempt >= self.max_retries:
+                    raise
+                attempt += 1
+                logger.warning(
+                    "Model stream interrupted; retrying before tool execution: attempt=%s/%s error=%s",
+                    attempt,
+                    self.max_retries,
+                    error,
+                )
+                if self.retry_delay_seconds:
+                    await asyncio.sleep(self.retry_delay_seconds * attempt)
+                current_response = await self._create_response_with_retry(args, kwargs)
 
 
 class SimpleTokenCounter(TokenCounterBase):
@@ -205,7 +288,11 @@ class ModelFactory:
                 generate_kwargs={"temperature": config.temperature},
             )
             logger.info(f"已创建 {provider} 模型: {config.model_name}")
-            return model
+            return RetryingStreamingModel(
+                model,
+                max_retries=settings.MODEL_STREAM_MAX_RETRIES,
+                retry_delay_seconds=settings.MODEL_STREAM_RETRY_DELAY_SECONDS,
+            )
 
         elif provider in ("minimax", "anthropic"):
             # MiniMax 和 Anthropic 使用 Anthropic 兼容 API
@@ -223,7 +310,11 @@ class ModelFactory:
                 generate_kwargs={"temperature": config.temperature},
             )
             logger.info(f"已创建 {provider} 模型: {config.model_name}")
-            return model
+            return RetryingStreamingModel(
+                model,
+                max_retries=settings.MODEL_STREAM_MAX_RETRIES,
+                retry_delay_seconds=settings.MODEL_STREAM_RETRY_DELAY_SECONDS,
+            )
         
         else:
             raise ValueError(f"不支持的模型提供商: {provider}")

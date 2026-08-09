@@ -1,13 +1,16 @@
 import asyncio
+import importlib.util
 import inspect
 import queue
 import tarfile
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 from fastapi import HTTPException
 
 from app.api.conversation import ChatRequest, _require_session_owner
@@ -16,8 +19,13 @@ from app.api.kuncode import (
     create_plan_preview,
     wait_for_plan_confirm,
 )
-from app.api.plans import update_plan_in_state
-from app.api.files import _is_within_workspace
+from app.api.plans import (
+    extract_last_finished_plan_from_state,
+    extract_plan_from_state,
+    plan_to_schema,
+    update_plan_in_state,
+)
+from app.api.files import _is_internal_workspace_item, _is_within_workspace
 from app.repositories.session_repo import SessionRepository
 from app.services.agent_service import (
     AgentService,
@@ -26,8 +34,10 @@ from app.services.agent_service import (
     _get_tool_result_id,
     _build_terminal_tool_results,
     _build_kuncode_completion_message,
+    _detect_kuncode_stage,
     _extract_persisted_tool_results,
     _extract_workspace_files,
+    _should_emit_tool_progress,
     _tool_output_failed,
     ConfirmedPlanNotebook,
     PlanConfirmationGate,
@@ -37,7 +47,18 @@ from agentscope.plan import SubTask
 from data_analysis_sandbox import _is_kuncode_failure
 from app.services.sandbox_injection import SandboxInjectionService
 from app.services.sandbox_cleanup_service import SandboxCleanupService
+from app.services.model_factory import RetryingStreamingModel
 from app.tasks import _local_tasks, start_local_task
+
+
+def _load_kuncode_stream_module():
+    """Load the standalone sandbox router without importing its package hooks."""
+    router_path = Path(__file__).resolve().parents[1] / "sandbox_image" / "routers" / "kuncode_stream.py"
+    spec = importlib.util.spec_from_file_location("test_kuncode_stream_router", router_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class FakeRedis:
@@ -91,7 +112,54 @@ class FakeSandboxWithFiles:
         )
 
 
+class FakeSandboxRecoveredRun:
+    async def run_kuncode(self, prompt):
+        yield SimpleNamespace(
+            content="Traceback (most recent call last):\nValueError: bad range\n",
+            metadata=None,
+        )
+        yield SimpleNamespace(
+            content=(
+                "Traceback (most recent call last):\nValueError: bad range\n"
+                "Done. Generated /workspace/results/recovered.csv\n"
+            ),
+            metadata={"success": True, "exit_code": 0, "error_code": None},
+        )
+
+
 class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_stream_retries_a_transient_connection_close_before_tools_run(self):
+        class FlakyModel:
+            stream = True
+
+            def __init__(self):
+                self.calls = 0
+
+            async def __call__(self, *_args, **_kwargs):
+                self.calls += 1
+                call_number = self.calls
+
+                async def response():
+                    if call_number == 1:
+                        yield "partial reasoning"
+                        raise httpx.RemoteProtocolError("incomplete chunked read")
+                    yield "retried reasoning"
+
+                return response()
+
+        model = FlakyModel()
+        retrying_model = RetryingStreamingModel(
+            model,
+            max_retries=1,
+            retry_delay_seconds=0,
+        )
+
+        response = await retrying_model([], tools=[])
+        chunks = [chunk async for chunk in response]
+
+        self.assertEqual(chunks, ["partial reasoning", "retried reasoning"])
+        self.assertEqual(model.calls, 2)
+
     async def test_plan_confirmation_is_scoped_to_exact_preview(self):
         redis = FakeRedis()
         with patch("app.api.kuncode._get_redis", new=AsyncMock(return_value=redis)):
@@ -303,6 +371,43 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
             strict=False,
         )
 
+    async def test_legacy_completed_plan_is_migrated_before_restore(self):
+        agent = Mock()
+        agent.state_dict.return_value = {
+            "memory": {"messages": []},
+            "plan_notebook": {
+                "storage": {"plans": {"finished": {"state": "todo"}}},
+                "current_plan": None,
+            },
+        }
+        legacy_state = {
+            "plan_notebook": {
+                "storage": {"plans": {"finished": {"state": "completed"}}},
+                "current_plan": {
+                    "name": "已完成计划",
+                    "state": "completed",
+                    "subtasks": [{"name": "步骤", "state": "completed"}],
+                },
+            },
+        }
+
+        restored_state = AgentService._restore_agent_state(agent, legacy_state)
+
+        self.assertIsNone(restored_state["plan_notebook"]["current_plan"])
+        self.assertEqual(
+            restored_state["plan_notebook"]["last_finished_plan"]["state"],
+            "done",
+        )
+        self.assertEqual(
+            restored_state["plan_notebook"]["last_finished_plan"]["subtasks"][0]["state"],
+            "done",
+        )
+        self.assertEqual(
+            restored_state["plan_notebook"]["storage"]["plans"]["finished"]["state"],
+            "done",
+        )
+        agent.load_state_dict.assert_called_once()
+
     async def test_finish_plan_retains_terminal_snapshot_for_persistence(self):
         gate = PlanConfirmationGate()
         gate.approve("计划", ["步骤"])
@@ -326,6 +431,33 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(notebook.last_finished_plan)
         self.assertEqual(notebook.last_finished_plan.state, "done")
         self.assertEqual(notebook.last_finished_plan.outcome, "结果已生成")
+
+    async def test_finish_plan_normalizes_legacy_completed_state(self):
+        gate = PlanConfirmationGate()
+        gate.approve("计划", ["步骤"])
+        notebook = ConfirmedPlanNotebook(gate, max_subtasks=10)
+        await notebook.create_plan(
+            name="计划",
+            description="描述",
+            expected_outcome="结果",
+            subtasks=[SubTask(name="步骤", description="执行步骤", expected_outcome="步骤完成")],
+        )
+
+        await notebook.finish_plan("completed", "结果已生成")
+
+        self.assertEqual(notebook.last_finished_plan.state, "done")
+
+    async def test_finished_plan_is_displayed_without_becoming_active_plan(self):
+        state = {
+            "plan_notebook": {
+                "current_plan": None,
+                "last_finished_plan": {"name": "已完成计划", "state": "done", "subtasks": []},
+            },
+        }
+
+        self.assertIsNone(extract_plan_from_state(state))
+        finished = extract_last_finished_plan_from_state(state)
+        self.assertEqual(plan_to_schema(finished).state, "done")
 
     async def test_plan_state_update_is_persisted(self):
         state = {"plan_notebook": {"current_plan": {"name": "计划", "state": "todo"}}}
@@ -400,16 +532,96 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         failed = _build_streamed_tool_result("call-2", "[ERROR] sandbox failed")
         self.assertEqual(failed["execution_status"], "failed")
 
+    async def test_structured_kuncode_outcome_overrides_recovered_tracebacks(self):
+        event = _build_streamed_tool_result(
+            "call-recovered",
+            (
+                "Traceback (most recent call last):\n"
+                "ValueError: empty range\n"
+                "Done. Generated /workspace/results/rental_records.csv\n"
+            ),
+            outcome={"success": True, "exit_code": 0},
+            tool_name="run_kuncode",
+        )
+
+        self.assertEqual(event["execution_status"], "completed")
+        self.assertEqual(event["stage"], "completed")
+        self.assertEqual(event["exit_code"], 0)
+
+        failed = _build_streamed_tool_result(
+            "call-failed",
+            "Done. Generated /workspace/results/looks-successful.csv",
+            outcome={
+                "success": False,
+                "exit_code": 1,
+                "error_code": "KUNCODE_NONZERO_EXIT",
+            },
+            tool_name="run_kuncode",
+        )
+        self.assertEqual(failed["execution_status"], "failed")
+        self.assertEqual(failed["error_code"], "KUNCODE_NONZERO_EXIT")
+
     async def test_streamed_tool_progress_remains_running_until_the_final_chunk(self):
         event = _build_streamed_tool_progress(
             "call-1",
-            [{"type": "text", "text": "KunCode is still running"}],
+            [{"type": "text", "text": "Resolving dependencies\n"}],
+            tool_name="run_kuncode",
         )
 
-        self.assertEqual(event["type"], "tool_result")
+        self.assertEqual(event["type"], "tool_progress")
         self.assertEqual(event["tool_id"], "call-1")
         self.assertEqual(event["phase"], "progress")
         self.assertEqual(event["execution_status"], "running")
+        self.assertEqual(event["stage"], "dependency_checking")
+
+    async def test_kuncode_stage_uses_the_latest_runtime_evidence(self):
+        self.assertEqual(
+            _detect_kuncode_stage(
+                "Resolving dependencies\nResolved, downloaded and extracted [6]\n",
+            )[0],
+            "dependency_installing",
+        )
+        self.assertEqual(
+            _detect_kuncode_stage(
+                "Resolving dependencies\nWrite /workspace/code/build_report.py\n",
+            )[0],
+            "file_generating",
+        )
+        self.assertEqual(
+            _detect_kuncode_stage(
+                "Traceback\nValueError\nEdit /workspace/code/build_report.py\n",
+            )[0],
+            "repairing",
+        )
+        self.assertEqual(
+            _detect_kuncode_stage("Write /workspace/results/report.xlsx\nVerify workbook structure"),
+            ("validating", None),
+        )
+
+    async def test_tool_progress_throttles_cumulative_chunks_but_not_stage_changes(self):
+        previous = {}
+        first = {"tool_id": "call-1", "content": "a" * 100, "stage": "model_processing"}
+        self.assertTrue(_should_emit_tool_progress(first, previous))
+        self.assertFalse(_should_emit_tool_progress(
+            {"tool_id": "call-1", "content": "a" * 200, "stage": "model_processing"},
+            previous,
+        ))
+        self.assertTrue(_should_emit_tool_progress(
+            {"tool_id": "call-1", "content": "a" * 200, "stage": "dependency_installing"},
+            previous,
+        ))
+        self.assertTrue(_should_emit_tool_progress(
+            {"tool_id": "call-1", "content": "a" * 2500, "stage": "dependency_installing"},
+            previous,
+        ))
+
+    async def test_sandbox_terminal_result_event_is_json_encoded(self):
+        router_module = _load_kuncode_stream_module()
+        event = router_module._kuncode_result_event(success=True, exit_code=0)
+        payload = json.loads(event.removeprefix("data: ").strip())
+        self.assertEqual(payload["event"], "kuncode_result")
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["exit_code"], 0)
 
     async def test_live_tool_result_accepts_agentscope_id_field(self):
         self.assertEqual(
@@ -434,6 +646,33 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertTrue(_tool_output_failed("Traceback\nRuntimeError: failed"))
         self.assertTrue(_is_kuncode_failure("[ERROR] KunCode exited with code 1."))
+
+    async def test_persisted_structured_success_recovers_a_traceback_history(self):
+        output = (
+            "Traceback (most recent call last):\nValueError: bad range\n"
+            "Done. Generated /workspace/results/recovered.csv\n"
+            "[[DATAAGENT_KUNCODE_OUTCOME:{\"success\":true,\"exit_code\":0,\"error_code\":null}]]"
+        )
+        messages = [
+            SimpleNamespace(message={
+                "type": "plugin_call_output",
+                "content": [{
+                    "type": "data",
+                    "data": {
+                        "call_id": "call-recovered",
+                        "output": json.dumps([{"type": "text", "text": output}]),
+                    },
+                }],
+            }),
+        ]
+
+        events = _extract_persisted_tool_results(
+            messages,
+            {"call-recovered": "run_kuncode"},
+        )
+
+        self.assertEqual(events[0]["execution_status"], "completed")
+        self.assertNotIn("DATAAGENT_KUNCODE_OUTCOME", events[0]["content"])
 
     async def test_persisted_tool_output_recovers_an_unstreamed_call(self):
         messages = [
@@ -499,6 +738,13 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_workspace_path_check_rejects_prefix_collision(self):
         self.assertTrue(_is_within_workspace(r"C:\data\workspace\report.txt", r"C:\data\workspace"))
         self.assertFalse(_is_within_workspace(r"C:\data\workspace-secret\report.txt", r"C:\data\workspace"))
+
+    async def test_delivery_file_listing_hides_internal_execution_artifacts(self):
+        self.assertTrue(_is_internal_workspace_item("scripts/build_report.py", is_directory=False))
+        self.assertTrue(_is_internal_workspace_item("code", is_directory=True))
+        self.assertTrue(_is_internal_workspace_item("results/debug.log", is_directory=False))
+        self.assertFalse(_is_internal_workspace_item("results/report.xlsx", is_directory=False))
+        self.assertFalse(_is_internal_workspace_item("reports/summary.html", is_directory=False))
 
     async def test_local_task_uses_requested_task_id(self):
         completed = asyncio.Event()
@@ -736,7 +982,9 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         output_message = insert_after_plugin_call.await_args.args[2]
         output_data = output_message["content"][0]["data"]
         self.assertEqual(output_data["call_id"], tool_id)
-        self.assertEqual(json.loads(output_data["output"])[0]["text"], "final result")
+        persisted_output = json.loads(output_data["output"])[0]["text"]
+        self.assertTrue(persisted_output.startswith("final result"))
+        self.assertIn("DATAAGENT_KUNCODE_OUTCOME", persisted_output)
 
     async def test_direct_kuncode_emits_generated_files(self):
         with (
@@ -756,3 +1004,23 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events[-1]["generated_files"], ["reports/summary.html"])
         self.assertIn("reports/summary.html", events[-1]["content"])
+
+    async def test_direct_kuncode_marks_a_recovered_run_completed(self):
+        with patch.object(SessionRepository, "get", new=AsyncMock(return_value=None)):
+            service = AgentService.__new__(AgentService)
+            events = [
+                event
+                async for event in service._direct_run_kuncode(
+                    FakeSandboxRecoveredRun(),
+                    "user-1",
+                    "session-1",
+                    "create recovered file",
+                    "create recovered file",
+                )
+            ]
+
+        tool_events = [event for event in events if event["type"] == "tool_result"]
+        self.assertEqual(len(tool_events), 1)
+        self.assertEqual(tool_events[0]["execution_status"], "completed")
+        self.assertEqual(tool_events[0]["stage"], "completed")
+        self.assertIn("recovered.csv", events[-1]["content"])

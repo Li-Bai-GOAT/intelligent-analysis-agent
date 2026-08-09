@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Paperclip, Send, Square } from 'lucide-react'
+import { Loader2, Paperclip, Send, Square } from 'lucide-react'
 import { useSessionStore } from '../../stores/session'
 import { ContextRing } from './ContextRing'
 
@@ -8,7 +8,7 @@ export function InputArea() {
   const [executionMode, setExecutionMode] = useState<'auto' | 'kuncode'>('auto')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const { sendMessage, pendingFiles, addPendingFiles, removePendingFile, isStreaming, contextInfo, disconnectStream, currentSession } = useSessionStore()
+  const { sendMessage, pendingFiles, addPendingFiles, removePendingFile, isStreaming, contextInfo, disconnectStream, currentSession, streamState } = useSessionStore()
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -40,9 +40,10 @@ export function InputArea() {
   }
 
   return (
-    <div className="px-4 py-2.5 bg-bg-surface border-t border-border">
+    <div className="border-t border-border bg-bg-surface px-4 py-2.5">
+      <div className="mx-auto w-full max-w-6xl">
       {pendingFiles.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div className="mb-2 flex flex-wrap gap-2">
           {pendingFiles.map((f, i) => (
             <span key={i} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-bg-elevated rounded-md text-xs text-text-secondary border border-border">
               <span className="w-5 h-5 rounded bg-success/20 text-success flex items-center justify-center text-[10px] font-bold">
@@ -55,30 +56,49 @@ export function InputArea() {
         </div>
       )}
 
+      {isStreaming && streamState.currentToolMessage && (
+        <div className="mb-3 inline-flex items-center gap-2 rounded-lg border border-accent/25 bg-accent/10 px-3 py-1.5 text-xs text-accent" role="status">
+          <Loader2 size={13} className="animate-spin" />
+          <span>{streamState.currentToolName === 'run_kuncode' ? 'KunCode：' : ''}{streamState.currentToolMessage}</span>
+          {streamState.currentToolStage === 'repairing' && streamState.currentToolAttemptIndex && (
+            <span className="text-text-secondary">第 {streamState.currentToolAttemptIndex} 次尝试</span>
+          )}
+        </div>
+      )}
+
       <div className="mb-2 inline-flex items-center gap-1" role="group" aria-label="执行模式">
         <button type="button" onClick={() => setExecutionMode('auto')} className={`inline-flex h-[38px] w-[82px] items-center justify-center rounded-lg border text-[11px] font-medium transition-colors ${executionMode === 'auto' ? 'border-accent bg-accent text-bg-base shadow-sm' : 'border-border bg-bg-elevated text-text-muted hover:border-border-light hover:bg-bg-hover hover:text-text-primary'}`}>自动</button>
         <button type="button" onClick={() => setExecutionMode('kuncode')} className={`inline-flex h-[38px] w-[82px] items-center justify-center rounded-lg border text-[11px] font-medium transition-colors ${executionMode === 'kuncode' ? 'border-accent bg-accent text-bg-base shadow-sm' : 'border-border bg-bg-elevated text-text-muted hover:border-border-light hover:bg-bg-hover hover:text-text-primary'}`}>KunCode</button>
       </div>
 
-      <div className="flex items-end gap-2">
+      <div className="flex h-[42px] items-center gap-1.5 rounded-xl border border-border-light bg-bg-elevated p-[3px] shadow-sm transition-colors focus-within:border-accent/60 focus-within:ring-1 focus-within:ring-accent/15">
         <input type="file" ref={fileInputRef} multiple hidden onChange={handleFileSelect} />
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="inline-flex size-[38px] shrink-0 items-center justify-center rounded-lg border border-border bg-bg-elevated text-text-muted transition-colors hover:border-accent/30 hover:text-accent cursor-pointer"
+          className="inline-flex size-[34px] shrink-0 items-center justify-center rounded-lg bg-bg-muted text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary cursor-pointer"
           title="上传文件"
         >
-          <Paperclip size={18} />
+          <Paperclip size={17} />
         </button>
 
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          rows={1}
-          className="h-[38px] min-h-[38px] max-h-[150px] flex-1 resize-none overflow-y-auto bg-bg-elevated border border-border rounded-lg px-3 py-[6px] text-[19px] leading-6 text-text-primary placeholder:text-[19px] placeholder:text-text-muted focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-all"
-        />
+        <div className="relative min-h-[34px] min-w-0 flex-1">
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            rows={1}
+            placeholder="问问 Data agent"
+            aria-label="向 Data agent 提问"
+            className="block h-[34px] min-h-[34px] max-h-[150px] w-full resize-none overflow-y-auto bg-transparent px-2 py-0 text-base leading-[34px] text-text-primary placeholder:text-transparent focus:outline-none"
+          />
+          {!text && (
+            <span aria-hidden="true" className="pointer-events-none absolute inset-0 flex items-center px-2 text-base leading-none text-text-muted">
+              问问 Data agent
+            </span>
+          )}
+        </div>
 
         {contextInfo && (
           <ContextRing
@@ -91,15 +111,16 @@ export function InputArea() {
         <button
           onClick={isStreaming ? disconnectStream : () => void handleSend()}
           disabled={!isStreaming && (!text.trim() || !currentSession)}
-          className={`inline-flex size-[38px] shrink-0 items-center justify-center rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed
+          className={`inline-flex size-[34px] shrink-0 items-center justify-center rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed
             ${isStreaming
               ? 'bg-error/15 text-error border border-error/30 hover:bg-error/25'
               : 'bg-accent text-bg-base hover:bg-accent-hover shadow-[0_2px_8px_rgba(45,212,168,0.25)]'
             }`}
           title={isStreaming ? '暂停' : '发送'}
         >
-          {isStreaming ? <Square size={18} /> : <Send size={18} />}
+          {isStreaming ? <Square size={16} /> : <Send size={17} />}
         </button>
+      </div>
       </div>
     </div>
   )

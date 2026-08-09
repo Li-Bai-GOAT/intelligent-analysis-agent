@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { Api } from '../api/client'
-import type { Session, Message, StreamData, PlanData } from '../types'
+import type { Session, Message, StreamData, PlanData, ToolExecutionStatus, ToolRuntimeStage } from '../types'
 import { useUiStore } from './ui'
 import { extractMessageContent, finalizeTurnMessages, mergeThinking, projectHistoryMessages } from './conversationProjection'
 
@@ -34,6 +34,9 @@ interface StreamState {
   assistantEl: string | null
   currentToolId: string | null
   currentToolName: string | null
+  currentToolStage: ToolRuntimeStage | null
+  currentToolMessage: string | null
+  currentToolAttemptIndex: number | null
   seenToolIds: Set<string>
   terminalCommands: Set<string>
 }
@@ -168,6 +171,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     assistantEl: null,
     currentToolId: null,
     currentToolName: null,
+    currentToolStage: null,
+    currentToolMessage: null,
+    currentToolAttemptIndex: null,
     seenToolIds: new Set(),
     terminalCommands: new Set(),
   },
@@ -244,6 +250,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         assistantEl: null,
         currentToolId: null,
         currentToolName: null,
+        currentToolStage: null,
+        currentToolMessage: null,
+        currentToolAttemptIndex: null,
         seenToolIds: new Set(),
         terminalCommands: new Set(),
       },
@@ -385,6 +394,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           assistantEl: null,
           currentToolId: null,
           currentToolName: null,
+          currentToolStage: null,
+          currentToolMessage: null,
+          currentToolAttemptIndex: null,
           seenToolIds: new Set(),
           terminalCommands: new Set(),
         },
@@ -503,6 +515,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 name: toolName,
                 arguments: toolInput,
                 execution_status: 'running' as const,
+                ...(data.stage ? { stage: data.stage } : {}),
+                ...(data.message ? { stage_message: data.message } : {}),
+                ...(data.attempt_index ? { attempt_index: data.attempt_index } : {}),
               }
               if (index >= 0) toolCalls[index] = { ...toolCalls[index], ...nextTool }
               else toolCalls.push(nextTool)
@@ -513,23 +528,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               seenToolIds: seen,
               currentToolId: toolId,
               currentToolName: toolName,
+              currentToolStage: data.stage || null,
+              currentToolMessage: data.message || null,
+              currentToolAttemptIndex: data.attempt_index || null,
             },
           }
         })
         break
       }
+      case 'tool_progress':
       case 'tool_result': {
+        const isProgress = data.type === 'tool_progress'
         const resultText = extractMessageContent(data.content ?? data.result ?? '')
-        const executionStatus = data.execution_status || (
-          resultText.toLowerCase().includes('[error]') ? 'failed' : 'completed'
-        )
+        const executionStatus = (isProgress
+          ? 'running'
+          : data.execution_status || (
+            resultText.toLowerCase().includes('[error]') ? 'failed' : 'completed'
+          )) as ToolExecutionStatus
         set((current) => ({
           messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => ({
             ...message,
             tool_calls: message.tool_calls?.map((tool) => tool.id === data.tool_id
-              ? { ...tool, result: resultText, execution_status: executionStatus }
+              ? (
+                isProgress && tool.execution_status && tool.execution_status !== 'running'
+                  ? tool
+                  : {
+                    ...tool,
+                    ...(resultText || !isProgress ? { result: resultText } : {}),
+                    execution_status: executionStatus,
+                    ...(data.stage ? { stage: data.stage } : {}),
+                    ...(data.message ? { stage_message: data.message } : {}),
+                    ...(data.attempt_index ? { attempt_index: data.attempt_index } : {}),
+                    ...(typeof data.exit_code === 'number' ? { exit_code: data.exit_code } : {}),
+                    ...(data.error_code ? { error_code: data.error_code } : {}),
+                  }
+              )
               : tool),
           })),
+          streamState: data.tool_id === current.streamState.currentToolId
+            ? {
+              ...current.streamState,
+              currentToolStage: data.stage || current.streamState.currentToolStage,
+              currentToolMessage: data.message || current.streamState.currentToolMessage,
+              currentToolAttemptIndex: data.attempt_index || current.streamState.currentToolAttemptIndex,
+            }
+            : current.streamState,
         }))
         break
       }
@@ -631,7 +674,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             'completed',
             '[ERROR] 工具调用未返回完整结果。',
           ),
-          streamState: { ...current.streamState, activeTurnId: null },
+          streamState: {
+            ...current.streamState,
+            activeTurnId: null,
+            currentToolStage: null,
+            currentToolMessage: null,
+            currentToolAttemptIndex: null,
+          },
         }))
         stopPendingPreviewPolling()
         void get().loadPlan()
@@ -649,7 +698,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             isStreaming: false,
             currentEventSource: null,
             messages: msgs,
-            streamState: { ...current.streamState, activeTurnId: null },
+            streamState: {
+              ...current.streamState,
+              activeTurnId: null,
+              currentToolStage: null,
+              currentToolMessage: null,
+              currentToolAttemptIndex: null,
+            },
           }
         })
         break
@@ -665,7 +720,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               'cancelled',
               `[CANCELLED] ${content}`,
             ),
-            streamState: { ...current.streamState, activeTurnId: null },
+            streamState: {
+              ...current.streamState,
+              activeTurnId: null,
+              currentToolStage: null,
+              currentToolMessage: null,
+              currentToolAttemptIndex: null,
+            },
           }
         })
         break
