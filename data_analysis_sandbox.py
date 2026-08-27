@@ -587,7 +587,11 @@ class DataAnalysisSandbox(Sandbox):
             MCP 服务器列表
 
         """
-        return self._run_kuncode_command("kuncode mcp list")
+        # Remote MCP endpoints may include credentials in query parameters.
+        # Preserve the diagnostic while never echoing credential values.
+        return self._run_kuncode_command(
+            "kuncode mcp list | sed -E 's/([?&](key|api_key|apikey|token|access_token|secret)=)[^&[:space:]]+/\\1***/Ig'"
+        )
 
 @SandboxRegistry.register(
     build_image_uri(f"runtime-sandbox-{SANDBOX_TYPE}"),
@@ -826,4 +830,7 @@ class DataAnalysisSandboxAsync(SandboxAsync):
             MCP 服务器列表
 
         """
-        return await self._run_kuncode_command("kuncode mcp list")
+        # Keep asynchronous diagnostics subject to the same redaction policy.
+        return await self._run_kuncode_command(
+            "kuncode mcp list | sed -E 's/([?&](key|api_key|apikey|token|access_token|secret)=)[^&[:space:]]+/\\1***/Ig'"
+        )

@@ -16,6 +16,7 @@ import docker
 from docker.errors import NotFound, APIError
 
 from app.models import SandboxAgent, SandboxSkill, SandboxMcp
+from app.services.mcp_secrets import McpSecretReferenceError, resolve_mcp_config
 
 # Skill 本地存储目录
 SKILL_STORAGE_DIR = Path("sandbox_skills")
@@ -346,8 +347,16 @@ class SandboxInjectionService:
             logger.info("已设置 permission.*=allow，静默全允许")
         
         for mcp in mcps:
-            kuncode_config["mcp"][mcp.name] = mcp.to_config()
-            result["injected"].append(mcp.name)
+            # Remove a stale config first.  A missing or revoked reference must
+            # never leave credentials from an earlier injection in the sandbox.
+            kuncode_config["mcp"].pop(mcp.name, None)
+            try:
+                kuncode_config["mcp"][mcp.name] = resolve_mcp_config(mcp.to_config())
+                result["injected"].append(mcp.name)
+            except McpSecretReferenceError as exc:
+                result["success"] = False
+                result["errors"].append(f"MCP '{mcp.name}' secret reference error: {exc}")
+                logger.warning("MCP secret reference unavailable: mcp=%s", mcp.name)
         
         # 写回 kuncode.json
         config_content = json.dumps(kuncode_config, indent=2, ensure_ascii=False).encode("utf-8")

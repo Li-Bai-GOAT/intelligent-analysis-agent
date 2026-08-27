@@ -84,7 +84,7 @@ export function AdminApp() {
         </aside>
 
         <main className="min-w-0 flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8 lg:py-7">
+          <div className="w-full px-4 py-5 sm:px-6 lg:px-8 lg:py-7">
             {readOnly && <div className="mb-5 border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-text-secondary">当前账号仅有查看权限，配置变更请联系管理员。</div>}
             <CurrentPage section={adminTab} readOnly={readOnly} />
           </div>

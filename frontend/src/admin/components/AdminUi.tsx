@@ -63,7 +63,7 @@ export function EmptyState({ title, description, action }: { title: string; desc
 export function StatusBadge({ enabled, on = '已启用', off = '已停用' }: { enabled: boolean; on?: string; off?: string }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap text-xs ${
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap text-sm leading-5 ${
         enabled ? 'text-success' : 'text-text-muted'
       }`}
     >

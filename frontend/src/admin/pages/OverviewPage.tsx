@@ -116,15 +116,18 @@ export function OverviewPage() {
           </section>
 
           <section>
-            <h2 className="mb-3 text-sm font-semibold text-text-primary">配置摘要</h2>
-            <div className="grid grid-cols-1 gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 xl:grid-cols-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold text-text-primary">配置摘要</h2>
+              <span className="text-xs text-text-muted">当前已加载的管理配置</span>
+            </div>
+            <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-2 lg:grid-cols-3">
               {metrics.map(({ label, value, detail, icon: Icon }) => (
-                <div key={label} className="bg-bg-surface px-4 py-4">
+                <div key={label} className="bg-bg-surface px-4 py-4 transition-colors hover:bg-bg-elevated">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-text-secondary">{label}</span>
-                    <Icon size={16} className="text-text-muted" />
+                    <span className="text-xs font-medium text-text-secondary">{label}</span>
+                    <Icon size={16} className="text-accent/70" />
                   </div>
-                  <p className="mt-3 text-2xl font-semibold text-text-primary">{value}</p>
+                  <p className="mt-3 text-2xl font-semibold tracking-tight text-text-primary">{value}</p>
                   <p className="mt-1 text-xs text-text-muted">{detail}</p>
                 </div>
               ))}

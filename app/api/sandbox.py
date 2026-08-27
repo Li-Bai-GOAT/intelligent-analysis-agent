@@ -18,6 +18,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.api.deps import get_admin_user, get_current_user
 from app.models import User, SandboxAgent, SandboxSkill, SandboxMcp
 from app.services.sandbox_injection import get_injection_service
+from app.services.mcp_secrets import (
+    McpSecretReferenceError,
+    SENSITIVE_NAME_PATTERN,
+    is_secret_reference,
+    validate_mcp_secret_references,
+)
 
 # Skill 存储目录
 SKILL_STORAGE_DIR = Path("sandbox_skills")
@@ -137,29 +143,47 @@ class McpResponse(BaseModel):
 _MASKED_VALUE = "***"
 
 
-def _mask_configuration(values: dict) -> dict:
-    """Keep configuration keys visible without exposing their values."""
-    return {str(key): _MASKED_VALUE for key in values}
+def _mask_configuration(values: dict, *, reveal_safe_values: bool) -> dict:
+    """Never return plaintext secrets, including from legacy configuration."""
+    masked = {}
+    for key, value in values.items():
+        key_text = str(key)
+        value_text = str(value)
+        if is_secret_reference(value_text):
+            masked[key_text] = value_text
+        elif not reveal_safe_values or SENSITIVE_NAME_PATTERN.search(key_text):
+            masked[key_text] = _MASKED_VALUE
+        else:
+            masked[key_text] = value
+    return masked
 
 
-def _mask_command(command: list) -> list:
-    """Expose the executable and option names, but never option values."""
+def _mask_command(command: list, *, reveal_safe_values: bool) -> list:
+    """Expose executable metadata while masking sensitive argument values."""
     if not command:
         return []
 
     masked = [command[0]]
     for value in command[1:]:
         text = str(value)
-        if text.startswith("-"):
-            option, separator, _ = text.partition("=")
-            masked.append(f"{option}{separator}{_MASKED_VALUE}" if separator else option)
+        option, separator, option_value = text.partition("=")
+        if separator and SENSITIVE_NAME_PATTERN.search(option):
+            masked.append(
+                f"{option}={option_value}"
+                if is_secret_reference(option_value)
+                else f"{option}={_MASKED_VALUE}"
+            )
+        elif reveal_safe_values:
+            masked.append(value)
+        elif text.startswith("-"):
+            masked.append(option)
         else:
             masked.append(_MASKED_VALUE)
     return masked
 
 
-def _mask_url(url: Optional[str]) -> Optional[str]:
-    """Preserve the endpoint identity while removing credentials and query values."""
+def _mask_url(url: Optional[str], *, reveal_safe_values: bool) -> Optional[str]:
+    """Preserve endpoint identity while masking credentials and secret query values."""
     if not url:
         return url
     try:
@@ -171,7 +195,22 @@ def _mask_url(url: Optional[str]) -> Optional[str]:
     netloc = hostname
     if port:
         netloc = f"{hostname}:{port}"
-    query = urlencode([(key, _MASKED_VALUE) for key, _ in parse_qsl(parts.query, keep_blank_values=True)])
+    query_items = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        secret_parameter = key.lower() in {"key", "api_key", "apikey", "token", "access_token", "secret"} or bool(SENSITIVE_NAME_PATTERN.search(key))
+        if is_secret_reference(value):
+            displayed_value = value
+        elif not reveal_safe_values or secret_parameter:
+            displayed_value = _MASKED_VALUE
+        else:
+            displayed_value = value
+        query_items.append((key, displayed_value))
+    query = (
+        urlencode(query_items)
+        .replace("%7B", "{")
+        .replace("%7D", "}")
+        .replace("%3A", ":")
+    )
     return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
 
 
@@ -181,10 +220,10 @@ def _mcp_to_response(mcp: SandboxMcp, *, reveal_secrets: bool) -> McpResponse:
         id=mcp.id,
         name=mcp.name,
         mcp_type=mcp.mcp_type,
-        url=mcp.url if reveal_secrets else _mask_url(mcp.url),
-        command=mcp.command if reveal_secrets else _mask_command(mcp.command),
-        headers=mcp.headers if reveal_secrets else _mask_configuration(mcp.headers),
-        environment=mcp.environment if reveal_secrets else _mask_configuration(mcp.environment),
+        url=_mask_url(mcp.url, reveal_safe_values=reveal_secrets),
+        command=_mask_command(mcp.command, reveal_safe_values=reveal_secrets),
+        headers=_mask_configuration(mcp.headers, reveal_safe_values=reveal_secrets),
+        environment=_mask_configuration(mcp.environment, reveal_safe_values=reveal_secrets),
         enabled=mcp.enabled,
         created_at=mcp.created_at.isoformat(),
         updated_at=mcp.updated_at.isoformat(),
@@ -564,6 +603,15 @@ async def list_mcps(user: User = Depends(get_current_user)):
 @router.post("/mcps", response_model=McpResponse, status_code=status.HTTP_201_CREATED, summary="创建MCP")
 async def create_mcp(data: McpCreate, admin: User = Depends(get_admin_user)):
     """创建新 MCP"""
+    try:
+        validate_mcp_secret_references(
+            url=data.url,
+            command=data.command,
+            headers=data.headers,
+            environment=data.environment,
+        )
+    except McpSecretReferenceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     existing = await SandboxMcp.filter(name=data.name).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"MCP '{data.name}' 已存在")
@@ -599,6 +647,16 @@ async def update_mcp(mcp_id: int, data: McpUpdate, admin: User = Depends(get_adm
     mcp = await SandboxMcp.filter(id=mcp_id).first()
     if not mcp:
         raise HTTPException(status_code=404, detail="MCP 不存在")
+
+    try:
+        validate_mcp_secret_references(
+            url=data.url if data.url is not None else mcp.url,
+            command=data.command if data.command is not None else mcp.command,
+            headers=data.headers if data.headers is not None else mcp.headers,
+            environment=data.environment if data.environment is not None else mcp.environment,
+        )
+    except McpSecretReferenceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():

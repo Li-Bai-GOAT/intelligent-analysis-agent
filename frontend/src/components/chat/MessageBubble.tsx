@@ -20,7 +20,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 function UserMessage({ message }: MessageBubbleProps) {
   return (
     <div className="flex justify-end mb-4">
-      <div className="flex items-start gap-2.5 max-w-[75%]">
+      <div className="flex items-start gap-2.5 max-w-[80%]">
         <div className="flex flex-col items-end gap-1.5">
           {message.files && message.files.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-1">
@@ -34,7 +34,7 @@ function UserMessage({ message }: MessageBubbleProps) {
               ))}
             </div>
           )}
-          <div className="px-3.5 py-2.5 rounded-xl rounded-tr-md bg-accent text-bg-base text-sm whitespace-pre-wrap leading-relaxed">
+          <div className="rounded-xl border border-transparent bg-accent px-3.5 py-2.5 text-sm leading-relaxed text-bg-base whitespace-pre-wrap">
             {message.content}
           </div>
         </div>
@@ -49,14 +49,14 @@ function UserMessage({ message }: MessageBubbleProps) {
 function AssistantMessage({ message }: MessageBubbleProps) {
   return (
     <div className="flex justify-start mb-4">
-      <div className="flex items-start gap-2.5 max-w-[85%]">
+      <div className="flex items-start gap-2.5 max-w-[80%]">
         <div className="w-7 h-7 rounded-full bg-bg-elevated text-text-muted flex items-center justify-center shrink-0 mt-0.5 border border-border">
           <Bot size={14} />
         </div>
         <div className="flex flex-col gap-2 min-w-0">
           {message.thinking && <ThinkingBlock content={message.thinking} running={message.status === 'running'} />}
           {message.content && (
-            <div className="px-3.5 py-2.5 rounded-xl rounded-tl-md bg-bg-surface border border-border text-sm leading-relaxed">
+            <div className="rounded-xl border border-border bg-bg-surface px-3.5 py-2.5 text-sm leading-relaxed">
               <MarkdownContent content={message.content} />
             </div>
           )}

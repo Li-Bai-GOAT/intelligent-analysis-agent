@@ -15,7 +15,7 @@ export function RightPanel() {
   const { rightTab, setRightTab } = useUiStore()
 
   return (
-    <aside className="flex flex-col w-[45%] min-w-[300px] bg-bg-surface border-l border-border shrink-0">
+    <aside className="flex flex-1 basis-0 flex-col min-w-[300px] bg-bg-surface border-l border-border">
       <div className="px-3 py-2 border-b border-border">
         <Tabs tabs={tabs} active={rightTab} onChange={(k) => setRightTab(k as typeof rightTab)} size="sm" />
       </div>

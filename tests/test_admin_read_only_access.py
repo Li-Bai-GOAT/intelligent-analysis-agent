@@ -77,7 +77,7 @@ class AdminReadOnlyAccessTests(unittest.TestCase):
         self.assertEqual(response.environment, {"API_KEY": "***"})
         self.assertEqual(response.command, ["npx", "--token=***", "***"])
 
-    def test_mcp_response_keeps_full_configuration_for_administrators(self):
+    def test_mcp_response_masks_legacy_plaintext_secrets_for_administrators(self):
         now = datetime.now()
         mcp = SimpleNamespace(
             id=1,
@@ -95,4 +95,23 @@ class AdminReadOnlyAccessTests(unittest.TestCase):
         response = sandbox._mcp_to_response(mcp, reveal_secrets=True)
 
         self.assertEqual(response.command, ["npx", "server"])
-        self.assertEqual(response.environment, {"API_KEY": "super-secret"})
+        self.assertEqual(response.environment, {"API_KEY": "***"})
+
+    def test_mcp_response_keeps_secret_references_visible_for_administrators(self):
+        now = datetime.now()
+        mcp = SimpleNamespace(
+            id=1,
+            name="referenced-remote",
+            mcp_type="remote",
+            url="https://mcp.example.com/mcp?key={{secret:AMAP_MCP_KEY}}",
+            command=[],
+            headers={},
+            environment={},
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+        response = sandbox._mcp_to_response(mcp, reveal_secrets=True)
+
+        self.assertIn("{{secret:AMAP_MCP_KEY}}", response.url or "")

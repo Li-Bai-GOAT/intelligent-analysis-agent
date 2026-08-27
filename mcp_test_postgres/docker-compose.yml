@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: dataagent_mcp_test_postgres
+    environment:
+      POSTGRES_DB: dataagent_mcp_test
+      # This container contains only generated sample data and binds its port
+      # to loopback.  Production and intranet sources must use managed secrets
+      # and a dedicated read-only database role instead.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:55578:5432"
+    volumes:
+      - dataagent_mcp_test_postgres_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dataagent_mcp_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  dataagent_mcp_test_postgres_data:
+    name: dataagent_mcp_test_postgres_data

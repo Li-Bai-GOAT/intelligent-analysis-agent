@@ -116,6 +116,17 @@ class Settings(BaseSettings):
     # 沙箱
     SANDBOX_BASE_URL: str = "http://localhost:10001"
     SANDBOX_BEARER_TOKEN: str = ""
+    # Comma-separated host environment names that MCP configuration is allowed
+    # to reference with {{secret:NAME}}.  An empty list fails closed.
+    MCP_SECRET_REFERENCE_ALLOWLIST: str = ""
+
+    @property
+    def mcp_secret_reference_allowlist(self) -> list[str]:
+        return [
+            name.strip()
+            for name in self.MCP_SECRET_REFERENCE_ALLOWLIST.split(",")
+            if name.strip()
+        ]
     
     # JWT
     JWT_SECRET: str = "change-this-in-production"

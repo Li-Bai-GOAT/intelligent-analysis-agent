@@ -13,7 +13,7 @@ import {
   Notice,
   PageHeader,
 } from '../components/AdminUi'
-import { formatDate, inputClass, textareaClass } from '../utils'
+import { adminTableActionCellClass, adminTableCellClass, adminTableClass, adminTableHeaderCellClass, formatDate, inputClass, searchInputClass, textareaClass } from '../utils'
 
 const pageSize = 50
 
@@ -145,16 +145,17 @@ export function KnowledgePage({ readOnly = false }: { readOnly?: boolean }) {
       {error && <Notice type="error">{error}</Notice>}
       {success && <Notice type="success">{success}</Notice>}
 
-      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_220px]">
+      <div className="grid w-full gap-0 sm:grid-cols-[minmax(0,1fr)_17rem]">
         <div className="relative">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
-          <input className={`${inputClass} pl-9`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="在当前页搜索标题或内容" />
+          <Search size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-text-muted" />
+          <input className={searchInputClass} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="在当前页搜索标题或内容" />
         </div>
         <input
           className={inputClass}
           value={category}
           onChange={(event) => { setCategory(event.target.value); setOffset(0) }}
-          placeholder="按分类筛选"
+          placeholder="分类"
+          aria-label="按分类筛选"
         />
       </div>
 
@@ -166,24 +167,31 @@ export function KnowledgePage({ readOnly = false }: { readOnly?: boolean }) {
         />
       ) : (
         <div className="overflow-x-auto border border-border">
-          <table className="w-full min-w-[760px] border-collapse text-left">
+          <table className={`${adminTableClass} min-w-[760px]`}>
+            <colgroup>
+              <col />
+              <col />
+              <col />
+              <col className="w-44" />
+              <col className="w-24" />
+            </colgroup>
             <thead className="bg-bg-elevated text-xs text-text-secondary">
               <tr>
-                <th className="px-4 py-3 font-medium">标题</th>
-                <th className="px-4 py-3 font-medium">分类</th>
-                <th className="px-4 py-3 font-medium">内容摘要</th>
-                <th className="px-4 py-3 font-medium">更新时间</th>
-                <th className="w-24 px-4 py-3 text-right font-medium">操作</th>
+                <th className={adminTableHeaderCellClass}>标题</th>
+                <th className={adminTableHeaderCellClass}>分类</th>
+                <th className={adminTableHeaderCellClass}>内容摘要</th>
+                <th className={`${adminTableHeaderCellClass} whitespace-nowrap`}>更新时间</th>
+                <th className={`${adminTableHeaderCellClass} w-24 text-right`}>操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border bg-bg-surface">
               {visibleItems.map((item) => (
                 <tr key={item.id} className="hover:bg-bg-elevated/60">
-                  <td className="max-w-64 px-4 py-3 text-sm font-medium text-text-primary"><span className="line-clamp-2">{item.title}</span></td>
-                  <td className="px-4 py-3 text-xs text-accent">{item.category}</td>
-                  <td className="max-w-md px-4 py-3 text-xs leading-5 text-text-secondary"><span className="line-clamp-2">{item.content}</span></td>
-                  <td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td>
-                  <td className="px-4 py-3">
+                  <td className={`${adminTableCellClass} max-w-64 font-medium text-text-primary`}><span className="line-clamp-2">{item.title}</span></td>
+                  <td className={`${adminTableCellClass} text-accent`}>{item.category}</td>
+                  <td className={`${adminTableCellClass} max-w-md text-text-secondary`}><span className="line-clamp-2">{item.content}</span></td>
+                  <td className={`${adminTableCellClass} whitespace-nowrap text-text-muted`}>{formatDate(item.updated_at)}</td>
+                  <td className={adminTableActionCellClass}>
                     <div className="flex justify-end gap-1">
                       <button title="查看详情" onClick={() => setViewing(item)} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Eye size={15} /></button>
                       {!readOnly && <><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></>}

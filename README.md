@@ -30,7 +30,7 @@ DataAgent 让用户通过对话上传数据、描述分析目标，并在同一�
 | Human-in-the-Loop | 支持计划预览、KunCode 任务描述预览、编辑确认、取消、超时与中断处理。 |
 | 文件交付 | 上传文件、浏览工作区、预览/编辑文本内容、下载单个文件或整个工作区 ZIP。 |
 | 知识库 | 在 PostgreSQL 保存正文，在 Milvus 保存可重建向量索引，用于知识检索增强。 |
-| 管理后台 | 管理知识库、系统提示词、Agent、Skill、MCP 及其沙箱注入。 |
+| 管理后台 | 所有已登录用户可只读查看总览、知识库、系统提示词、Skill 与 MCP；管理员负责写操作和 Agent/沙箱注入配置。 |
 
 ---
 
@@ -106,7 +106,7 @@ sequenceDiagram
 
 前后端共享 `frontend/src/types/index.ts` 中的流式事件定义。常见事件包括：
 
-`text`、`thinking`、`status`、`tool_call`、`tool_result`、`plan`、`plan_preview`、`kuncode_preview`、`generated_files`、`error`、`interrupted` 和 `end`。
+`text`、`thinking`、`status`、`tool_call`、`tool_progress`、`tool_result`、`plan`、`plan_preview`、`kuncode_preview`、`plan_confirmed`、`kuncode_confirmed`、`user_input_request`、`user_input_received`、`auto_continue`、`generated_files`、`error`、`interrupted`、`step_complete` 和 `end`。
 
 同一次工具调用通过稳定的 `tool_id` 关联 `tool_call` 与 `tool_result`，前端据此原位更新终端记录，避免重复渲染。
 
@@ -184,6 +184,9 @@ Copy-Item .env.example .env
 docker start data_analysis_postgres data_analysis_redis
 docker compose -f .\milvus\docker-compose.yml up -d
 
+# 若使用 Docker 版 Ollama Embedding，再启动这一项
+docker compose -f .\embedding\docker-compose.yml up -d
+
 # 启动 Sandbox Manager 与 FastAPI
 .\scripts\start.ps1 -Action up
 
@@ -224,7 +227,7 @@ Invoke-WebRequest http://127.0.0.1:9091/healthz
 Invoke-RestMethod http://127.0.0.1:9997/v1/models
 ```
 
-`/ready` 将 PostgreSQL、Redis 和 Sandbox 作为基础可用性依赖；Milvus 与 Embedding 可以显示 `degraded`，表示知识库链路受限，而非基础对话必然不可用。
+`scripts/start.ps1` 以 `/live` 判断主服务是否启动，再由状态输出报告依赖情况。`/ready` 将 PostgreSQL、Redis 和 Sandbox 作为基础可用性依赖；Milvus 与 Embedding 可以显示 `degraded`，表示知识库链路受限，而非基础对话必然不可用。若未运行 Docker 版 Ollama，脚本会尝试使用仓库上级 `.runtime/ollama` 中的原生回退运行时。
 
 最低回归验证：
 

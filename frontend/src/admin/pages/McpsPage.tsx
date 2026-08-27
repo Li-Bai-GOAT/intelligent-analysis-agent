@@ -7,7 +7,7 @@ import { Modal } from '../../components/ui/Modal'
 import { Switch } from '../../components/ui/Switch'
 import type { McpConfig, McpCreateInput, McpType } from '../types'
 import { ConfirmDialog, EmptyState, Field, LoadingState, Notice, PageHeader, StatusBadge } from '../components/AdminUi'
-import { formatDate, inputClass, textareaClass } from '../utils'
+import { adminTableActionCellClass, adminTableCellClass, adminTableClass, adminTableHeaderCellClass, formatDate, searchInputClass, textareaClass } from '../utils'
 
 function parseStringMap(value: string, label: string) {
   try {
@@ -61,13 +61,13 @@ function McpForm({ item, busy, onCancel, onSave }: { item: McpConfig | null; bus
         </Field>
         {type === 'remote' ? (
           <>
-            <Input label="服务 URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/mcp" />
-            <Field label="请求头（JSON）" hint="敏感值会提交到后端，请勿在截图或日志中公开。"><textarea className={`${textareaClass} min-h-40 font-mono text-xs`} value={headers} onChange={(event) => setHeaders(event.target.value)} spellCheck={false} /></Field>
+            <Input label="服务 URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/mcp?key={{secret:AMAP_MCP_KEY}}" />
+            <Field label="请求头（JSON）" hint="密钥使用 {{secret:NAME}} 引用；值仅在注入沙箱时从本机 .env 解析。"><textarea className={`${textareaClass} min-h-40 font-mono text-xs`} value={headers} onChange={(event) => setHeaders(event.target.value)} spellCheck={false} /></Field>
           </>
         ) : (
           <>
             <Field label="启动命令" hint="每行一个数组元素，第一行为可执行程序，其余行为参数。"><textarea className={`${textareaClass} min-h-32 font-mono text-xs`} value={command} onChange={(event) => setCommand(event.target.value)} spellCheck={false} placeholder={'npx\n-y\n@modelcontextprotocol/server-filesystem'} /></Field>
-            <Field label="环境变量（JSON）"><textarea className={`${textareaClass} min-h-40 font-mono text-xs`} value={environment} onChange={(event) => setEnvironment(event.target.value)} spellCheck={false} /></Field>
+            <Field label="环境变量（JSON）" hint="密钥使用 {{secret:NAME}} 引用；不要保存明文密码或连接串。"><textarea className={`${textareaClass} min-h-40 font-mono text-xs`} value={environment} onChange={(event) => setEnvironment(event.target.value)} spellCheck={false} /></Field>
           </>
         )}
         <Switch checked={enabled} onChange={setEnabled} label="启用 MCP" />
@@ -144,12 +144,12 @@ export function McpsPage({ readOnly = false }: { readOnly?: boolean }) {
     <div className="space-y-5">
       <PageHeader title="MCP 管理" description={readOnly ? '浏览 KunCode 可调用的 MCP 服务；敏感配置已脱敏。' : '维护 KunCode 可调用的本地与远程 MCP 工具服务。'} actions={!readOnly ? <Button size="sm" onClick={() => { setEditor('new'); setSuccess('') }}><Plus size={15} />新建 MCP</Button> : undefined} />
       {error && <Notice type="error">{error}</Notice>}{success && <Notice type="success">{success}</Notice>}
-      <div className="relative max-w-xl"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" /><input className={`${inputClass} pl-9`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、URL 或命令" /></div>
+      <div className="relative w-full"><Search size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-text-muted" /><input className={searchInputClass} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、URL 或命令" /></div>
       {readOnly && <Notice type="success">敏感配置已由后端脱敏，页面不会接收真实凭据。</Notice>}
 
       {loading ? <LoadingState label="正在加载 MCP 配置" /> : visibleItems.length === 0 ? <EmptyState title={items.length ? '没有匹配的 MCP' : '尚未配置 MCP'} description={items.length ? '调整搜索内容后重试。' : readOnly ? '当前没有可浏览的 MCP 服务。' : '创建 MCP 后可将外部工具能力提供给 KunCode。'} action={!items.length && !readOnly ? <Button size="sm" onClick={() => setEditor('new')}><Plus size={15} />新建 MCP</Button> : undefined} /> : (
-        <div className="overflow-x-auto border border-border"><table className="w-full min-w-[800px] border-collapse text-left"><thead className="bg-bg-elevated text-xs text-text-secondary"><tr><th className="px-4 py-3 font-medium">MCP</th><th className="px-4 py-3 font-medium">类型</th><th className="px-4 py-3 font-medium">连接目标</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">更新时间</th><th className="w-24 px-4 py-3 text-right font-medium">操作</th></tr></thead><tbody className="divide-y divide-border bg-bg-surface">
-          {visibleItems.map((item) => <tr key={item.id} className="hover:bg-bg-elevated/60"><td className="px-4 py-3 text-sm font-medium text-text-primary">{item.name}</td><td className="px-4 py-3 font-mono text-xs text-accent">{item.mcp_type}</td><td className="max-w-md px-4 py-3"><p className="truncate font-mono text-xs text-text-secondary">{item.mcp_type === 'remote' ? item.url : item.command.join(' ')}</p></td><td className="px-4 py-3"><StatusBadge enabled={item.enabled} /></td><td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td><td className="px-4 py-3"><div className="flex justify-end gap-1"><button title="查看详情" onClick={() => setViewing(item)} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Eye size={15} /></button>{!readOnly && <><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></>}</div></td></tr>)}
+        <div className="overflow-x-auto border border-border"><table className={`${adminTableClass} min-w-[800px]`}><thead className="bg-bg-elevated"><tr><th className={adminTableHeaderCellClass}>MCP</th><th className={adminTableHeaderCellClass}>类型</th><th className={adminTableHeaderCellClass}>连接目标</th><th className={adminTableHeaderCellClass}>状态</th><th className={adminTableHeaderCellClass}>更新时间</th><th className={`${adminTableHeaderCellClass} w-24 text-right`}>操作</th></tr></thead><tbody className="divide-y divide-border bg-bg-surface">
+          {visibleItems.map((item) => <tr key={item.id} className="hover:bg-bg-elevated/60"><td className={`${adminTableCellClass} font-medium text-text-primary`}>{item.name}</td><td className={`${adminTableCellClass} font-mono text-accent`}>{item.mcp_type}</td><td className={`${adminTableCellClass} max-w-md`}><p className="truncate font-mono text-sm leading-5 text-text-secondary">{item.mcp_type === 'remote' ? item.url : item.command.join(' ')}</p></td><td className={adminTableCellClass}><StatusBadge enabled={item.enabled} /></td><td className={`${adminTableCellClass} whitespace-nowrap text-text-muted`}>{formatDate(item.updated_at)}</td><td className={adminTableActionCellClass}><div className="flex justify-end gap-1"><button title="查看详情" onClick={() => setViewing(item)} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Eye size={15} /></button>{!readOnly && <><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></>}</div></td></tr>)}
         </tbody></table></div>
       )}
       {editor && <Modal open title={editor === 'new' ? '新建 MCP' : `编辑 ${editor.name}`} size="lg" onClose={() => !busy && setEditor(null)}><McpForm key={editor === 'new' ? 'new' : editor.id} item={editor === 'new' ? null : editor} busy={busy} onCancel={() => setEditor(null)} onSave={save} /></Modal>}

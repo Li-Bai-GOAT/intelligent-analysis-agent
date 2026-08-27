@@ -9,7 +9,7 @@
 - 当前有效前端：`frontend/src/` 下的 React 单页应用。FastAPI 从 `frontend/dist/` 提供生产静态文件。
 - 核心角色：DataPM 产品经理 Agent 负责理解需求、规划和调度；KunCode 在隔离沙箱中执行代码、Shell 和文件生成任务。
 - 对话页负责展示用户/Agent 对话、计划、终端事件和执行状态；实际生成文件通过右侧“文件”页浏览、预览和下载，不应把终端当作文件交付入口。
-- 管理后台仅面向管理员，当前包含总览、知识库、系统提示词、Agent、Skill 和 MCP 管理。
+- 管理后台面向已登录用户：总览、知识库、系统提示词、Skill 和 MCP 支持只读浏览；共享配置写操作和 Agent 管理仍仅限管理员。MCP 对非管理员必须脱敏。
 - 默认管理员账号只用于本地联调。不要把账号、密码、Token 或 API Key 写入源码、文档、日志或提交信息。
 - 当前 Git 主线是 `main`。不要自行恢复已删除的旧功能分支，也不要重新引入旧静态前端。
 
@@ -47,7 +47,7 @@ FastAPI :8090
 
 后端和前端共同依赖 `frontend/src/types/index.ts` 中的事件契约。修改任务流时必须同步检查 `app/services/agent_service.py`、`app/tasks.py`、`app/api/conversation.py` 和 `frontend/src/stores/session.ts`。
 
-- 常用事件类型：`text`、`thinking`、`tool_call`、`tool_result`、`status`、`plan`、`kuncode_preview`、`plan_preview`、`user_input_required`、`context_update`、`interrupted`、`error`、`end`。
+- 常用事件类型：`text`、`thinking`、`tool_call`、`tool_progress`、`tool_result`、`status`、`plan`、`kuncode_preview`、`plan_preview`、`plan_confirmed`、`kuncode_confirmed`、`user_input_request`、`user_input_required`、`user_input_received`、`context_update`、`auto_continue`、`interrupted`、`step_complete`、`error`、`end`。
 - 同一次工具调用的 `tool_call` 与 `tool_result` 必须使用相同且稳定的 `tool_id`。
 - 可恢复事件应保留 `event_id`、`task_id`、`session_id`。
 - 工具状态使用 `phase` 和 `execution_status`；完成、失败、中断都必须进入终态，不能让前端永久显示 `running`。
@@ -113,6 +113,7 @@ FastAPI :8090
 | `app/services/milvus_bootstrap.py` | Milvus 数据库、集合、维度和索引初始化 |
 | `app/utils/milvus_client.py` | Embedding 调用和 Milvus CRUD/检索 |
 | `frontend/src/stores/` | JWT、会话、SSE 任务和 UI 状态 |
+| `frontend/src/stores/conversationProjection.ts` | 将可恢复的流式事件投影为单轮对话、思考与工具状态 |
 | `frontend/src/components/` | 对话、布局、文件/计划/终端面板 |
 | `frontend/src/admin/` | 管理后台页面和类型 |
 | `data_analysis_sandbox.py` | 自定义同步/异步沙箱类型与工具代理 |
@@ -140,6 +141,8 @@ FastAPI :8090
 | Ollama OpenAI-compatible API | 9997 | `GET /v1/models` |
 
 `scripts/start.ps1 -Action status` 对 PostgreSQL、Redis、Milvus 只显示端口监听状态，因此可能显示 `health=n/a`。真实依赖状态以 `http://127.0.0.1:8090/ready` 为准。
+
+启动脚本使用 `/live` 作为主服务启动探针，避免 Milvus 或 Sandbox 预热时 `/ready` 的依赖探测阻塞进程拉起；应用启动后仍应以 `/ready` 判断整体依赖状态。
 
 ### 6.2 环境变量
 
@@ -317,7 +320,7 @@ Invoke-RestMethod http://127.0.0.1:9997/v1/models
 
 ## 12. 已知边界与判断原则
 
-- `README.md` 同时保留了部分 Linux/历史部署说明；Windows 当前权威启动入口是 `scripts/start.ps1` 和本文件的命令。
+- `README.md` 是当前产品、架构和本地运行入口；Windows 当前权威启动入口仍是 `scripts/start.ps1` 和本文件的命令。`start.sh`、`start_sandbox_server.sh` 仅作为历史 Linux 入口保留，不应作为 Windows 主流程。
 - Milvus 与 Embedding 对基础对话不是硬阻塞依赖，故 `/ready` 可能在它们 degraded 时仍返回主服务可用；知识库功能则不可视为正常。
 - 管理后台已经重构，但用户管理、审计日志、提示词版本历史和回滚仍不是完整功能，不要在未检查代码前假定存在。
 - 当前没有独立前端测试套件，前端最低验证是 lint、TypeScript/Vite build 和真实浏览器流程。
@@ -332,7 +335,7 @@ Invoke-RestMethod http://127.0.0.1:9997/v1/models
 | KunCode 无输出/调用失败 | `data_analysis_sandbox.py`、`kuncode_stream.py`、`sandbox_proxy_extension.py`、沙箱日志 |
 | 终端重复命令或一直 running | 事件 `tool_id`、`phase`、`execution_status` 和 `TerminalPanel.tsx` |
 | 生成文件未显示 | `generated_files`、`FilesPanel.tsx`、sandbox binding 和 workspace API |
-| 管理后台接口问题 | `frontend/src/admin/`、`frontend/src/api/admin.ts`、`app/api/sandbox.py` |
+| 管理后台接口问题 | `frontend/src/admin/`、`frontend/src/api/admin.ts`、`app/api/knowledge.py`、`app/api/system_prompt.py`、`app/api/sandbox.py` |
 | 提示词乱码 | `system_prompt.md`、`app/api/system_prompt.py`、数据库 `system_prompts` 记录 |
 | 知识库 degraded | `/ready`、Ollama `/v1/models`、Milvus health、集合维度 |
 | 启动/停止异常 | `scripts/start.ps1`、`.pids/`、`logs/*.err.log`，先核验真实监听进程 |

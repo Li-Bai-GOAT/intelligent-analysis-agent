@@ -15,7 +15,7 @@ import {
   PageHeader,
   StatusBadge,
 } from '../components/AdminUi'
-import { formatDate, inputClass, textareaClass } from '../utils'
+import { adminTableActionCellClass, adminTableCellClass, adminTableClass, adminTableHeaderCellClass, formatDate, inputClass, searchInputClass, textareaClass } from '../utils'
 
 function parseObject(value: string, label: string) {
   try {
@@ -201,26 +201,26 @@ export function AgentsPage() {
       <PageHeader title="Agent 管理" description="配置主 Agent、子 Agent 的指令、工具权限和运行参数。" actions={<Button size="sm" onClick={() => { setEditor('new'); setSuccess('') }}><Plus size={15} />新建 Agent</Button>} />
       {error && <Notice type="error">{error}</Notice>}
       {success && <Notice type="success">{success}</Notice>}
-      <div className="relative max-w-xl">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
-        <input className={`${inputClass} pl-9`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或描述" />
+      <div className="relative w-full">
+        <Search size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-text-muted" />
+        <input className={searchInputClass} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或描述" />
       </div>
 
       {loading ? <LoadingState label="正在加载 Agent 配置" /> : visibleItems.length === 0 ? (
         <EmptyState title={items.length ? '没有匹配的 Agent' : '尚未配置 Agent'} description={items.length ? '调整搜索内容后重试。' : '创建 Agent 后可在对话中选择并运行。'} action={!items.length ? <Button size="sm" onClick={() => setEditor('new')}><Plus size={15} />新建 Agent</Button> : undefined} />
       ) : (
         <div className="overflow-x-auto border border-border">
-          <table className="w-full min-w-[820px] border-collapse text-left">
-            <thead className="bg-bg-elevated text-xs text-text-secondary"><tr><th className="px-4 py-3 font-medium">Agent</th><th className="px-4 py-3 font-medium">模式</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">运行参数</th><th className="px-4 py-3 font-medium">更新时间</th><th className="w-24 px-4 py-3 text-right font-medium">操作</th></tr></thead>
+          <table className={`${adminTableClass} min-w-[820px]`}>
+            <thead className="bg-bg-elevated"><tr><th className={adminTableHeaderCellClass}>Agent</th><th className={adminTableHeaderCellClass}>模式</th><th className={adminTableHeaderCellClass}>状态</th><th className={adminTableHeaderCellClass}>运行参数</th><th className={adminTableHeaderCellClass}>更新时间</th><th className={`${adminTableHeaderCellClass} w-24 text-right`}>操作</th></tr></thead>
             <tbody className="divide-y divide-border bg-bg-surface">
               {visibleItems.map((item) => (
                 <tr key={item.id} className="hover:bg-bg-elevated/60">
-                  <td className="max-w-sm px-4 py-3"><div className="flex items-center gap-2"><span className="text-sm font-medium text-text-primary">{item.name}</span>{item.hidden && <EyeOff size={13} className="text-text-muted" />}</div><p className="mt-1 line-clamp-1 text-xs text-text-secondary">{item.description}</p></td>
-                  <td className="px-4 py-3 text-xs text-text-secondary">{item.mode === 'all' ? '全部' : item.mode === 'primary' ? '主 Agent' : '子 Agent'}</td>
-                  <td className="px-4 py-3"><StatusBadge enabled={item.enabled} /></td>
-                  <td className="px-4 py-3 font-mono text-xs text-text-muted">T {item.temperature ?? 'default'} · Steps {item.max_steps ?? 'default'}</td>
-                  <td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted">{formatDate(item.updated_at)}</td>
-                  <td className="px-4 py-3"><div className="flex justify-end gap-1"><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></div></td>
+                  <td className={`${adminTableCellClass} max-w-sm`}><div className="flex items-center gap-2"><span className="font-medium text-text-primary">{item.name}</span>{item.hidden && <EyeOff size={13} className="text-text-muted" />}</div><p className="mt-1 line-clamp-1 text-sm leading-5 text-text-secondary">{item.description}</p></td>
+                  <td className={`${adminTableCellClass} text-text-secondary`}>{item.mode === 'all' ? '全部' : item.mode === 'primary' ? '主 Agent' : '子 Agent'}</td>
+                  <td className={adminTableCellClass}><StatusBadge enabled={item.enabled} /></td>
+                  <td className={`${adminTableCellClass} font-mono text-text-muted`}>T {item.temperature ?? 'default'} · Steps {item.max_steps ?? 'default'}</td>
+                  <td className={`${adminTableCellClass} whitespace-nowrap text-text-muted`}>{formatDate(item.updated_at)}</td>
+                  <td className={adminTableActionCellClass}><div className="flex justify-end gap-1"><button title="编辑" onClick={() => { setEditor(item); setSuccess('') }} className="p-2 text-text-muted hover:bg-bg-hover hover:text-accent"><Pencil size={15} /></button><button title="删除" onClick={() => setDeleting(item)} className="p-2 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={15} /></button></div></td>
                 </tr>
               ))}
             </tbody>

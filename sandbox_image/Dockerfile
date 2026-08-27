@@ -21,6 +21,13 @@ ENV DEEPSEEK_BASE_URL=""
 ENV MIMO_API_KEY=""
 ENV MIMO_BASE_URL="https://api.xiaomimimo.com/v1"
 
+# Keep the PostgreSQL MCP runtime in the image instead of downloading an
+# unpinned package every time a sandbox starts.  The test datasource is only
+# injected at runtime by the application; installing this binary alone does
+# not grant any database access.
+ARG POSTGRES_MCP_VERSION=0.1.0-rc.8
+RUN npm install --global --no-audit --no-fund @microsoft/postgres-mcp@${POSTGRES_MCP_VERSION}
+
 # ============= 安装 KunCode（本地离线安装）=============
 COPY kuncode-linux-x64.tar.gz /tmp/
 RUN mkdir -p /root/.local/bin && \
