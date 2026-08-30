@@ -40,9 +40,12 @@ export interface ToolCall {
   attempt_index?: number
   exit_code?: number
   error_code?: string
+  termination_reason?: ToolTerminationReason
+  termination_confirmed?: boolean
 }
 
 export type ToolExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled'
+export type ToolTerminationReason = 'completed' | 'timeout' | 'cancelled' | 'process_error'
 export type ToolRuntimeStage =
   | 'sandbox_preparing'
   | 'model_processing'
@@ -100,6 +103,9 @@ export interface StreamData {
   success?: boolean
   exit_code?: number | null
   error_code?: string | null
+  termination_reason?: ToolTerminationReason
+  termination_confirmed?: boolean
+  execution_id?: string | null
   generated_files?: string[]
 }
 

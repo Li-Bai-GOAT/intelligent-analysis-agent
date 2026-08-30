@@ -1,4 +1,14 @@
-# Plan: Make the right-side Plan panel update in realtime
+# 计划面板实时更新计划
+
+> 状态：已实施，待最新浏览器 E2E
+>
+> 统一优先级：维护项
+>
+> 估算完成度：约 90%
+>
+> 最后核验：2026-08-29
+>
+> 原始标题：Make the right-side Plan panel update in realtime
 
 ## Context
 

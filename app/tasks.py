@@ -41,6 +41,20 @@ celery_app = Celery(
     backend=settings.CELERY_BACKEND_URL,
 )
 
+# Celery limits are process-level safety rails, not competing semantic
+# deadlines. Always leave enough time for the task deadline to stop KunCode
+# and receive the container's termination confirmation first.
+_celery_soft_limit = max(
+    settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    settings.TASK_DEADLINE_SECONDS
+    + int(settings.KUNCODE_TERMINATION_CONFIRM_SECONDS)
+    + 5,
+)
+_celery_hard_limit = max(
+    settings.CELERY_TASK_TIME_LIMIT,
+    _celery_soft_limit + 30,
+)
+
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -48,8 +62,8 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=True,
     result_expires=settings.CELERY_RESULT_EXPIRES,
-    task_time_limit=settings.CELERY_TASK_TIME_LIMIT,
-    task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    task_time_limit=_celery_hard_limit,
+    task_soft_time_limit=_celery_soft_limit,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     task_routes={
@@ -72,7 +86,7 @@ def _run_async(coro):
 async def _close_task_agent_service(agent_service: AgentService) -> None:
     """Close per-task async resources without releasing shared sandboxes."""
     for resource in (
-        getattr(agent_service, "cleanup_service", None),
+        getattr(agent_service, "lifecycle_service", None),
         getattr(agent_service, "session_service", None),
         getattr(agent_service, "state_service", None),
     ):

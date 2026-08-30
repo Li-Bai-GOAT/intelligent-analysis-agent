@@ -10,6 +10,7 @@ SandboxManager 代理扩展
 """
 import logging
 import json
+import time
 
 import httpx
 from fastapi import Request, HTTPException
@@ -26,6 +27,18 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _remaining_timeout(body: bytes, default: float) -> float:
+    """Use the caller's absolute deadline instead of introducing a new one."""
+    try:
+        payload = json.loads(body or b"{}")
+        deadline_at_ms = payload.get("deadline_at_ms")
+        if deadline_at_ms is None:
+            return default
+        return max(0.1, (int(deadline_at_ms) - int(time.time() * 1000)) / 1000.0)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
 
 
 async def _get_container_info(sandbox_id: str) -> dict:
@@ -63,7 +76,12 @@ async def _proxy_request(
     try:
         body = await request.body()
         
-        async with httpx.AsyncClient(timeout=3600.0) as client:
+        timeout_seconds = _remaining_timeout(body, 30.0)
+        timeout = httpx.Timeout(
+            timeout=timeout_seconds,
+            connect=min(10.0, timeout_seconds),
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
             if method == "GET":
                 response = await client.get(target_url, headers=headers)
             else:
@@ -106,10 +124,19 @@ async def _proxy_stream(
         headers["Authorization"] = f"Bearer {runtime_token}"
     
     body = await request.body()
+    # Execution still stops at deadline_at_ms inside the container. The small
+    # transport drain allowance lets the terminal timeout event and process
+    # termination confirmation travel back without racing the semantic limit.
+    timeout_seconds = _remaining_timeout(body, 7200.0) + 7.0
     
     async def stream_generator():
         try:
-            async with httpx.AsyncClient(timeout=3600.0) as client:
+            timeout = httpx.Timeout(
+                timeout=timeout_seconds,
+                connect=min(10.0, timeout_seconds),
+                read=timeout_seconds,
+            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream(
                     "POST",
                     target_url,

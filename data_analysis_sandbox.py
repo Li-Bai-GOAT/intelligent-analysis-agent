@@ -21,6 +21,8 @@ import re
 import asyncio
 import json
 import logging
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional, List, Generator, AsyncGenerator
 logger = logging.getLogger(__name__)
@@ -67,10 +69,15 @@ def _normalize_kuncode_outcome(value: Any) -> dict[str, Any] | None:
         except (TypeError, ValueError):
             exit_code = None
     error_code = value.get("error_code")
+    termination_reason = value.get("termination_reason")
+    if termination_reason not in {"completed", "timeout", "cancelled", "process_error"}:
+        termination_reason = "completed" if value.get("success") else "process_error"
     return {
         "success": bool(value.get("success")),
         "exit_code": exit_code,
         "error_code": str(error_code) if error_code else None,
+        "termination_reason": termination_reason,
+        "execution_id": str(value.get("execution_id")) if value.get("execution_id") else None,
     }
 
 
@@ -80,6 +87,8 @@ def _encode_kuncode_outcome_marker(outcome: dict[str, Any]) -> str:
         "success": bool(outcome.get("success")),
         "exit_code": outcome.get("exit_code"),
         "error_code": outcome.get("error_code"),
+        "termination_reason": outcome.get("termination_reason"),
+        "execution_id": outcome.get("execution_id"),
     }
     return (
         f"\n{KUNCODE_OUTCOME_MARKER_PREFIX}"
@@ -231,6 +240,7 @@ class StreamingClient:
         url: str,
         json_data: dict,
         headers: Optional[dict] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> AsyncGenerator[Any, None]:
 
         """
@@ -245,34 +255,63 @@ class StreamingClient:
         """
         import codecs
         import json
-        client = cls.get_async_client()
         headers = headers or {}
-        async with client.stream("POST", url, json=json_data, headers=headers) as response:
+        import httpx
+        total_timeout = max(0.1, timeout_seconds or 7200.0)
+        timeout = httpx.Timeout(
+            timeout=total_timeout,
+            connect=min(10.0, total_timeout),
+            read=total_timeout,
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", url, json=json_data, headers=headers) as response:
+                response.raise_for_status()
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                buffer = ""
+                async for chunk in response.aiter_bytes():
+                    text = decoder.decode(chunk)
+                    buffer += text
+                    # 处理完整的 SSE 事件（以 \n\n 分隔）
+                    while "\n\n" in buffer:
+                        event, buffer = buffer.split("\n\n", 1)
+                        for line in event.split("\n"):
+                            line = line.strip()
+                            if line.startswith("data: "):
+                                content = line[6:]
+                                if content == "[DONE]":
+                                    return
+                                # JSON 解码恢复换行符等特殊字符
+                                try:
+                                    decoded = json.loads(content)
+                                    yield decoded
+                                except json.JSONDecodeError:
+                                    yield content
+
+    @classmethod
+    async def request_json_async(
+        cls,
+        method: str,
+        url: str,
+        *,
+        json_data: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        timeout_seconds: float = 10.0,
+    ) -> dict:
+        import httpx
+        timeout_seconds = max(0.1, timeout_seconds)
+        timeout = httpx.Timeout(
+            timeout=timeout_seconds,
+            connect=min(10.0, timeout_seconds),
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                method,
+                url,
+                json=json_data,
+                headers=headers or {},
+            )
             response.raise_for_status()
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            buffer = ""
-            async for chunk in response.aiter_bytes():
-                text = decoder.decode(chunk)
-                buffer += text
-                # 处理完整的 SSE 事件（以 \n\n 分隔）
-                while "\n\n" in buffer:
-                    event, buffer = buffer.split("\n\n", 1)
-                    for line in event.split("\n"):
-                        line = line.strip()
-                        if line.startswith("data: "):
-                            content = line[6:]
-                            if content == "[DONE]":
-                                return
-                            if content.startswith("[ERROR]"):
-                                logger.error(f"SSE Error: {content}")
-                                yield content
-                                return
-                            # JSON 解码恢复换行符等特殊字符
-                            try:
-                                decoded = json.loads(content)
-                                yield decoded
-                            except json.JSONDecodeError:
-                                yield content
+            return response.json()
 # 沙箱类型标识符
 SANDBOX_TYPE = "data_analysis"
 SANDBOX_TYPE_ASYNC = "data_analysis_async"
@@ -328,6 +367,8 @@ def _finalize_kuncode_outcome(
         "success": not failed,
         "exit_code": None,
         "error_code": "KUNCODE_STREAM_ERROR" if failed else None,
+        "termination_reason": "process_error" if failed else "completed",
+        "execution_id": None,
     }
 
 
@@ -338,6 +379,72 @@ def _normalize_kuncode_agent(agent: Optional[str]) -> Optional[str]:
     if not normalized or normalized.lower() in {"none", "null", "undefined", "default"}:
         return None
     return normalized
+
+
+class _KunCodeExecutionControl:
+    """Carry one top-level execution deadline through the sandbox HTTP calls."""
+
+    def configure_execution_context(
+        self,
+        *,
+        execution_id: str,
+        deadline_at_ms: int,
+    ) -> None:
+        self._dataagent_execution_id = execution_id
+        self._dataagent_deadline_at_ms = deadline_at_ms
+
+    def _execution_context(self) -> tuple[str, int | None, float]:
+        execution_id = getattr(self, "_dataagent_execution_id", None) or uuid.uuid4().hex
+        deadline_at_ms = getattr(self, "_dataagent_deadline_at_ms", None)
+        if deadline_at_ms is None:
+            remaining = 7200.0
+        else:
+            remaining = max(0.1, (deadline_at_ms - int(time.time() * 1000)) / 1000.0)
+        return execution_id, deadline_at_ms, remaining
+
+    def _control_url(self, path: str) -> str:
+        return f"{self.base_url}/sandbox/{self.sandbox_id}/fastapi/{path}"
+
+    async def cancel_kuncode(
+        self,
+        execution_id: Optional[str] = None,
+        *,
+        grace_seconds: float = 5.0,
+        confirmation_timeout: float = 10.0,
+        termination_reason: str = "cancelled",
+    ) -> dict[str, Any]:
+        execution_id = execution_id or getattr(self, "_dataagent_execution_id", None)
+        if not execution_id:
+            return {
+                "active": False,
+                "termination_confirmed": True,
+                "already_stopped": True,
+            }
+        return await StreamingClient.request_json_async(
+            "POST",
+            self._control_url("cancel_kuncode"),
+            json_data={
+                "execution_id": execution_id,
+                "grace_seconds": grace_seconds,
+                "termination_reason": termination_reason,
+            },
+            headers=self._get_auth_headers(),
+            timeout_seconds=confirmation_timeout,
+        )
+
+    async def kuncode_process_status(
+        self,
+        execution_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        execution_id = execution_id or getattr(self, "_dataagent_execution_id", None)
+        if not execution_id:
+            return {"active": False, "termination_confirmed": True, "not_found": True}
+        return await StreamingClient.request_json_async(
+            "GET",
+            self._control_url(f"kuncode/process/{execution_id}"),
+            headers=self._get_auth_headers(),
+            timeout_seconds=10.0,
+        )
 
 
 @SandboxRegistry.register(
@@ -374,11 +481,21 @@ def _normalize_kuncode_agent(agent: Optional[str]) -> Optional[str]:
         "SILICONFLOW_API_KEY": os.getenv("SILICONFLOW_API_KEY", "")
     },
     runtime_config={
-        "restart_policy": {"Name": "unless-stopped"},
+        # Session sandboxes are runtime-managed resources, not persistent
+        # infrastructure. A Docker daemon restart must not revive an orphan.
+        "restart_policy": {"Name": "no"},
+        # Session-specific metadata is persisted in PostgreSQL and Runtime
+        # mapping metadata. AgentScope 1.0.5 only accepts static Docker labels
+        # at registry time, so use these labels to identify project ownership.
+        "labels": {
+            "app": "dataagent",
+            "sandbox_type": "data_analysis",
+            "config_version": os.getenv("SANDBOX_CONFIG_VERSION", "deepseek-v1"),
+        },
     },
 )
 
-class DataAnalysisSandbox(Sandbox):
+class DataAnalysisSandbox(_KunCodeExecutionControl, Sandbox):
 
     """
     数据分析沙箱类（同步版本）
@@ -510,13 +627,23 @@ class DataAnalysisSandbox(Sandbox):
             "session_id": session_id,
             "output_format": output_format,
         }
+        execution_id, deadline_at_ms, remaining_seconds = self._execution_context()
+        request_data.update({
+            "execution_id": execution_id,
+            "deadline_at_ms": deadline_at_ms,
+        })
         url = self._get_sse_url()
         headers = self._get_auth_headers()
         accumulated_output = ""
         terminal_outcome: dict[str, Any] | None = None
         try:
             # 使用异步 SSE 流，不阻塞事件循环
-            async for event in StreamingClient.stream_sse_async(url, request_data, headers):
+            async for event in StreamingClient.stream_sse_async(
+                url,
+                request_data,
+                headers,
+                timeout_seconds=remaining_seconds + 7.0,
+            ):
                 structured_outcome = _normalize_kuncode_outcome(event)
                 if structured_outcome is not None:
                     terminal_outcome = structured_outcome
@@ -536,8 +663,20 @@ class DataAnalysisSandbox(Sandbox):
                     is_last=False,
                 )
         except asyncio.CancelledError:
-            # 中断时重新抛出，确保取消正确传播
             logger.info("KunCode SSE streaming cancelled by user")
+            cancel_reason = (
+                "timeout"
+                if deadline_at_ms is not None
+                and deadline_at_ms <= int(time.time() * 1000)
+                else "cancelled"
+            )
+            try:
+                await asyncio.shield(self.cancel_kuncode(
+                    execution_id,
+                    termination_reason=cancel_reason,
+                ))
+            except Exception:
+                logger.exception("KunCode cancellation confirmation failed")
             raise
         except Exception as e:
             logger.exception("KunCode SSE streaming failed")
@@ -547,6 +686,8 @@ class DataAnalysisSandbox(Sandbox):
                 "success": False,
                 "exit_code": None,
                 "error_code": "KUNCODE_STREAM_INCOMPLETE",
+                "termination_reason": "timeout" if e.__class__.__name__.endswith("Timeout") else "process_error",
+                "execution_id": execution_id,
             }
         terminal_outcome = _finalize_kuncode_outcome(
             accumulated_output,
@@ -627,11 +768,16 @@ class DataAnalysisSandbox(Sandbox):
         "SILICONFLOW_API_KEY": os.getenv("SILICONFLOW_API_KEY", "")
     },
     runtime_config={
-        "restart_policy": {"Name": "unless-stopped"},
+        "restart_policy": {"Name": "no"},
+        "labels": {
+            "app": "dataagent",
+            "sandbox_type": "data_analysis",
+            "config_version": os.getenv("SANDBOX_CONFIG_VERSION", "deepseek-v1"),
+        },
     },
 )
 
-class DataAnalysisSandboxAsync(SandboxAsync):
+class DataAnalysisSandboxAsync(_KunCodeExecutionControl, SandboxAsync):
 
     """
     数据分析沙箱类（异步版本）
@@ -761,12 +907,22 @@ class DataAnalysisSandboxAsync(SandboxAsync):
             "session_id": session_id,
             "output_format": output_format,
         }
+        execution_id, deadline_at_ms, remaining_seconds = self._execution_context()
+        request_data.update({
+            "execution_id": execution_id,
+            "deadline_at_ms": deadline_at_ms,
+        })
         url = self._get_sse_url()
         headers = self._get_auth_headers()
         accumulated_output = ""
         terminal_outcome: dict[str, Any] | None = None
         try:
-            async for event in StreamingClient.stream_sse_async(url, request_data, headers):
+            async for event in StreamingClient.stream_sse_async(
+                url,
+                request_data,
+                headers,
+                timeout_seconds=remaining_seconds + 7.0,
+            ):
                 structured_outcome = _normalize_kuncode_outcome(event)
                 if structured_outcome is not None:
                     terminal_outcome = structured_outcome
@@ -785,6 +941,22 @@ class DataAnalysisSandboxAsync(SandboxAsync):
                     stream=True,
                     is_last=False,
                 )
+        except asyncio.CancelledError:
+            logger.info("KunCode SSE streaming cancelled by user")
+            cancel_reason = (
+                "timeout"
+                if deadline_at_ms is not None
+                and deadline_at_ms <= int(time.time() * 1000)
+                else "cancelled"
+            )
+            try:
+                await asyncio.shield(self.cancel_kuncode(
+                    execution_id,
+                    termination_reason=cancel_reason,
+                ))
+            except Exception:
+                logger.exception("KunCode cancellation confirmation failed")
+            raise
         except Exception as e:
             logger.exception("KunCode SSE streaming failed")
             accumulated_output += f"\n[ERROR] KunCode stream request failed: {str(e)}"
@@ -792,6 +964,8 @@ class DataAnalysisSandboxAsync(SandboxAsync):
                 "success": False,
                 "exit_code": None,
                 "error_code": "KUNCODE_STREAM_INCOMPLETE",
+                "termination_reason": "timeout" if e.__class__.__name__.endswith("Timeout") else "process_error",
+                "execution_id": execution_id,
             }
         terminal_outcome = _finalize_kuncode_outcome(
             accumulated_output,

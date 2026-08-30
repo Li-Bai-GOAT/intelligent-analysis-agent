@@ -63,21 +63,40 @@ class SessionCleanupService:
         user_files = await UserFile.filter(user_id=user_id, session_id=session_id).all()
 
         # Release the actual runtime container before removing its binding.
+        # A failed/unknown release deliberately aborts deletion: removing the
+        # database fact first would turn the container into an untraceable
+        # orphan and violate the lifecycle's two-phase release protocol.
         if binding:
             try:
                 from app.services.agent_service import AgentService
+                from app.services.sandbox_lifecycle_service import SandboxStatus
 
                 agent_service = AgentService.get_instance()
-                if agent_service.sandbox_service:
-                    await asyncio.to_thread(
-                        agent_service.sandbox_service.release,
-                        session_id,
-                        str(binding.user_id),
+                if agent_service._started:
+                    await agent_service.interrupt_agent(session_id, user_id)
+                lifecycle = getattr(agent_service, "lifecycle_service", None)
+                if lifecycle is None:
+                    raise RuntimeError("Sandbox lifecycle service is unavailable")
+                released = await lifecycle.release(
+                    session_id,
+                    reason="session_delete",
+                    # The user explicitly deleted the session, so its task has
+                    # first been cancelled and the release may proceed even
+                    # while the in-process generator unwinds.
+                    force=True,
+                    retry_failed=True,
+                )
+                if released is None or released.status != SandboxStatus.RELEASED:
+                    release_status = released.status if released else "UNKNOWN"
+                    raise RuntimeError(
+                        f"Sandbox release is not confirmed (status={release_status})"
                     )
                 result["deleted"]["sandbox_runtime"] = 1
             except Exception as e:
                 result["errors"].append(f"释放沙箱容器失败: {e}")
                 logger.error("释放沙箱容器失败 %s: %s", session_id, e)
+                result["success"] = False
+                return result
 
         # Physical deletion is restricted to project-owned data roots.
         project_root = Path(__file__).resolve().parents[2]

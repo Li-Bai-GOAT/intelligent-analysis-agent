@@ -4,7 +4,8 @@
 """
 
 import uuid
-from typing import List, Optional
+from datetime import datetime
+from typing import List, Optional, Sequence
 
 from app.models.file import UserFile, SandboxBinding
 
@@ -69,7 +70,12 @@ class SandboxBindingRepository:
         sandbox_type: str = "data_analysis",
         workspace_path: str = "/workspace",
         mount_dir: Optional[str] = None,
+        status: str = "ACTIVE",
+        last_activity_at: Optional[datetime] = None,
+        lease_expires_at: Optional[datetime] = None,
+        config_version: str = "v1",
     ) -> SandboxBinding:
+        is_active = status in {"ACTIVE", "IDLE", "RELEASING"}
         return await SandboxBinding.create(
             id=uuid.uuid4(),
             user_id=user_id,
@@ -78,6 +84,11 @@ class SandboxBindingRepository:
             sandbox_type=sandbox_type,
             workspace_path=workspace_path,
             mount_dir=mount_dir,
+            status=status,
+            is_active=is_active,
+            last_activity_at=last_activity_at,
+            lease_expires_at=lease_expires_at,
+            config_version=config_version,
         )
     
     @staticmethod
@@ -87,7 +98,19 @@ class SandboxBindingRepository:
     @staticmethod
     async def list_active() -> List[SandboxBinding]:
         """返回仍声明占用运行时沙箱的绑定。"""
-        return await SandboxBinding.filter(is_active=True).all()
+        return await SandboxBinding.filter(
+            status__in=["ACTIVE", "IDLE", "RELEASING"]
+        ).all()
+
+    @staticmethod
+    async def list_by_statuses(statuses: Sequence[str]) -> List[SandboxBinding]:
+        return await SandboxBinding.filter(status__in=list(statuses)).all()
+
+    @staticmethod
+    async def list_idle_oldest() -> List[SandboxBinding]:
+        return await SandboxBinding.filter(status="IDLE").order_by(
+            "last_activity_at", "created_at"
+        )
     
     @staticmethod
     async def update(
@@ -97,6 +120,17 @@ class SandboxBindingRepository:
         mount_dir: Optional[str] = None,
         is_active: Optional[bool] = None,
         synced_file_ids: Optional[List[str]] = None,
+        status: Optional[str] = None,
+        last_activity_at: Optional[datetime] = None,
+        lease_expires_at: Optional[datetime] = None,
+        released_at: Optional[datetime] = None,
+        release_attempts: Optional[int] = None,
+        last_error: Optional[str] = None,
+        runtime_seen_at: Optional[datetime] = None,
+        config_version: Optional[str] = None,
+        clear_lease: bool = False,
+        clear_released_at: bool = False,
+        clear_last_error: bool = False,
     ) -> int:
         update_data = {}
         if sandbox_id is not None:
@@ -109,8 +143,34 @@ class SandboxBindingRepository:
             update_data["is_active"] = is_active
         if synced_file_ids is not None:
             update_data["synced_file_ids"] = synced_file_ids
+        if status is not None:
+            update_data["status"] = status
+            # Keep the temporary legacy field truthful for callers that have
+            # not yet moved to the lifecycle response.
+            update_data["is_active"] = status in {"ACTIVE", "IDLE", "RELEASING"}
+        if last_activity_at is not None:
+            update_data["last_activity_at"] = last_activity_at
+        if lease_expires_at is not None:
+            update_data["lease_expires_at"] = lease_expires_at
+        if released_at is not None:
+            update_data["released_at"] = released_at
+        if release_attempts is not None:
+            update_data["release_attempts"] = release_attempts
+        if last_error is not None:
+            update_data["last_error"] = last_error
+        if runtime_seen_at is not None:
+            update_data["runtime_seen_at"] = runtime_seen_at
+        if config_version is not None:
+            update_data["config_version"] = config_version
+        if clear_lease:
+            update_data["lease_expires_at"] = None
+        if clear_released_at:
+            update_data["released_at"] = None
+        if clear_last_error:
+            update_data["last_error"] = None
         
         if update_data:
+            update_data["updated_at"] = datetime.now()
             return await SandboxBinding.filter(session_id=session_id).update(**update_data)
         return 0
     

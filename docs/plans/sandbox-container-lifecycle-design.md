@@ -1,9 +1,20 @@
 # 沙箱容器回收与清理设计方案
 
-> 状态：待实施  
+> 状态：已实施，待验收（持久化状态、任务租约、幂等释放、失败重试和数据库驱动的恢复扫描已实现；仍需按本文集成场景观察）
+>
+> 统一优先级：P0
+>
+> 估算完成度：约 85%
+>
+> 最后核验：2026-08-29
+>
 > 编制日期：2026-07-23  
 > 适用范围：AgentScope Runtime、`data_analysis` 沙箱、KunCode、会话文件工作区  
 > 目标：保证“一个会话至多绑定一个可验证的沙箱”，限制容器总量，并在会话结束、空闲超时、服务重启或异常遗留后可靠回收容器和工作区。
+
+本次实施记录（2026-08-29）：已增加 `SandboxLifecycleService` 与 Aerich 迁移；会话任务会持久化续租、结束后转为 `IDLE`，释放按 `RELEASING → RELEASED/FAILED` 执行。启动扫描和孤儿候选判断从 `sandbox_bindings` 读取事实，未知容器默认只读报告，须经管理员显式确认后才释放。
+
+补充实施记录（2026-08-30）：已统一任务 deadline、HTTP 剩余时间传递和 KunCode 取消协议。每次执行使用同一个 `execution_id/deadline_at_ms`；中断会终止并确认所有带执行标记的容器进程（包括逃逸到新进程组的 shell 子进程），终态明确区分 `timeout/cancelled/process_error`。真实会话中断与 Linux 进程集成测试均确认无残留进程。
 
 ## 1. 背景与问题
 
@@ -222,3 +233,13 @@ SANDBOX_MAX_RELEASE_ATTEMPTS=3
 - 最大风险是误回收仍在执行的容器。通过任务租约、Redis 活跃任务检查、最小存活期、数据库行锁和 `RELEASING` 两阶段状态降低风险。
 - 首次上线先开启“只记录、不释放”的协调模式，人工核对候选孤儿后再启用自动释放。
 - 如出现异常，将自动释放开关关闭，保留运行态查看和手动释放接口；数据库状态与挂载目录不回滚删除。
+
+## 11. 统一超时、取消与子进程终止（已实施）
+
+- `TASK_DEADLINE_SECONDS` 是唯一用户可见的语义 deadline；模型执行由剩余时间约束，沙箱适配器和 HTTP 代理向容器传递同一个绝对 `deadline_at_ms`。
+- Celery soft/hard limit 仅作为晚于顶层 deadline 的进程级保险丝，预留 KunCode 终止确认窗口，不再与业务 deadline 同时触发。
+- 每次 KunCode 运行生成唯一 `execution_id`，并向进程环境注入 `DATAAGENT_EXECUTION_ID`。取消时先扫描 `/proc/*/environ`，对所有继承标记的进程执行 `SIGTERM`，宽限期后升级为 `SIGKILL`，再收割僵尸进程。
+- 终止确认同时要求：执行标记进程为空、原进程组不存在、已观察 PID 均不存在。`POST /cancel_kuncode` 幂等返回确认结果，`GET /kuncode/process/{execution_id}` 提供权威终态查询。
+- 中断 API 返回 `execution_id`、`sandbox_id`、`termination_reason` 和 `termination_confirmed`；SSE/工具结果及前端状态保留 `timeout/cancelled/process_error`。
+- 自动化覆盖：deadline 下传、三类终态、幂等终止确认；Linux 镜像内覆盖取消、deadline 超时和非零退出，其中取消与超时均使用逃逸到新进程组的长任务。
+- 真实验收覆盖：临时用户和会话实际调用 KunCode，确认中断前容器内存在 KunCode/长任务进程，中断后取消 API、容器状态端点和 `docker top` 均证明无残留，随后通过正式会话删除流程释放测试资源。

@@ -1,35 +1,55 @@
 # DataAgent 文档索引
 
-本目录收纳项目的规划、审查与验收记录。根目录仅保留项目入口、协作基线与默认系统提示词。
+本目录收纳当前路线图、专项计划、安全指南和验收记录。项目介绍从根目录 README 开始；实际行为始终以当前代码和可重复验证结果为准。
 
-## 入口文档
+## 当前入口
 
-- [README](../README.md)：项目定位、功能概览、安装和使用入口。
-- [AGENTS](../AGENTS.md)：当前架构、运行约定、数据边界与验证要求。
-- [system_prompt](../system_prompt.md)：DataPM 默认系统提示词。
-- [项目目录地图](project-structure.md)：按文件夹定位代码、运行时数据、基础设施与归档资料。
+| 文档 | 用途 |
+| --- | --- |
+| [项目 README](../README.md) | 项目定位、架构、功能和本地运行。 |
+| [协作与运行基线](../AGENTS.md) | 端口、事件协议、数据边界、开发和验收约束。 |
+| [统一优化路线图](ROADMAP.md) | 当前 P0/P1、依赖、完成定义和专项状态；后续排期以此为准。 |
+| [项目目录地图](project-structure.md) | 按文件夹定位代码、基础设施和运行时数据。 |
+| [默认系统提示词](../system_prompt.md) | DataPM 默认行为约束。 |
 
-## 规划
+## 当前活跃专项
 
-| 文档 | 用途 | 使用建议 |
+| 专项 | 状态 | 优先级 |
 | --- | --- | --- |
-| [项目缺陷整改指导](plans/project-remediation-guide.md) | 历史问题基线与分阶段整改路线 | 实施前以当前代码和可复现验证结果为准。 |
-| [管理后台前端重构方案](plans/admin-ui-refactor-plan.md) | 管理后台的信息架构与重构计划 | 作为规划参考，不代表所有阶段均已落地。 |
-| [数据分析 Skill / 知识库 E2E 执行计划](plans/data-skill-knowledge-e2e-plan.md) | 数据技能和知识库的端到端执行计划 | 已有对应验收报告可供对照。 |
-| [单轮对话聚合与 KunCode 结束态修复计划](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 修复一问多思考/多回答、过度规划与 KunCode 永久运行态 | 按状态协议、回合投影、提示词和真实浏览器矩阵分阶段实施。 |
-| [KunCode 终端状态、运行环境与进度提示优化计划](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 统一独立调用/内部重试终态，明确 Linux 沙箱，并展示依赖安装与文件生成阶段 | 优先贯通结构化退出结果，再增加阶段提示和依赖性能优化。 |
-| [普通用户后台只读访问改造计划](plans/read-only-admin-access-plan.md) | 对已登录普通用户开放后台只读浏览，管理员保留写操作 | 实施前重点核对鉴权、MCP 脱敏与 401/403 行为。 |
-| [计划面板实时更新计划](plans/plan-panel-realtime-update-plan.md) | 将后端 `plan` SSE 事件同步到右侧计划面板 | 聚焦流式状态、持久化状态和会话切换的一致性。 |
+| [沙箱容器回收与生命周期](plans/sandbox-container-lifecycle-design.md) | 部分实施，持久状态和租约待完成 | P0 |
+| [管理后台重构](plans/admin-ui-refactor-plan.md) | 基础页面已完成，治理能力待完成 | P1 |
+| [KunCode 终端与运行时 UX](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 核心协议已实施，安全/性能/自动化待完成 | P1 |
 
-## 验收报告
+## 已实施或有条件通过
 
-| 文档 | 用途 | 日期 |
+| 专项 | 状态 | 剩余验收 |
 | --- | --- | --- |
-| [数据分析 Skill / 知识库 E2E 验收报告](reports/data-skill-knowledge-e2e-validation.md) | 已部署资产、验证结果、修复项与未覆盖项 | 2026-07-21 |
+| [单轮对话聚合与结束态](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 已验证 | 前端自动化回归 |
+| [普通用户后台只读访问](plans/read-only-admin-access-plan.md) | 已验证 | 浏览器权限矩阵 |
+| [计划面板实时更新](plans/plan-panel-realtime-update-plan.md) | 已实施 | 刷新、重连和会话切换 E2E |
+| [数据 Skill / 知识库 E2E](plans/data-skill-knowledge-e2e-plan.md) | 有条件通过 | 后台 UI、Skill deny 负向用例 |
 
-## 不纳入本目录的 Markdown
+## 历史基线
 
-- `sandbox_skills/`：沙箱运行时的 Skill 说明、参考资料和模板。
-- `artifacts/`：端到端验证产物、审查证据和本地历史归档，见 [artifacts/README.md](../artifacts/README.md)。
+| 文档 | 说明 |
+| --- | --- |
+| [项目缺陷整改指导](plans/project-remediation-guide.md) | 以 2026-07-11 代码为基线，大量问题已经解决；剩余项已转入统一路线图。 |
 
-这些文件应与相应运行资产保留在同一目录，避免文档与实际输入、输出脱离。
+## 安全与运行指南
+
+- [MCP 密钥引用](mcp-secret-references.md)：敏感配置的引用、白名单和运行时解析规则。
+
+## 验收与 QA 报告
+
+| 报告 | 状态 |
+| --- | --- |
+| [数据 Skill / 知识库 E2E 验收](reports/data-skill-knowledge-e2e-validation.md) | 有条件通过；历史真实接口与沙箱证据。 |
+| [聊天输入视觉 QA](reports/chat-input-visual-qa.md) | 被认证状态阻塞，尚未完成登录后视觉对比。 |
+
+## 不属于项目规划的 Markdown
+
+- `sandbox_skills/`：沙箱 Skill 说明、参考资料和模板，是运行时资产。
+- `artifacts/`：端到端验证产物、事件证据和历史归档。
+- `mcp_test_postgres/README.md`：独立 MCP 测试服务说明。
+
+这些文件应留在对应资产目录，不并入统一路线图。

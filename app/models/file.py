@@ -49,8 +49,21 @@ class SandboxBinding(Model):
     # 沙箱的本地挂载目录（用于沙箱重建时迁移文件）
     mount_dir = fields.CharField(max_length=512, null=True)
     
-    # 沙箱状态
+    # 兼容旧客户端的状态位。它始终与 status 保持一致：
+    # ACTIVE / IDLE / RELEASING 为 True，其余状态为 False。
     is_active = fields.BooleanField(default=True)
+
+    # 持久化生命周期事实。不能再只依赖进程内的空闲时间字典，因为
+    # 服务重启和多 worker 时该字典会发生漂移。
+    status = fields.CharField(max_length=16, default="ACTIVE", index=True)
+    last_activity_at = fields.DatetimeField(null=True)
+    lease_expires_at = fields.DatetimeField(null=True)
+    released_at = fields.DatetimeField(null=True)
+    release_attempts = fields.IntField(default=0)
+    # 只保存经过脱敏和长度限制的运行时错误；绝不写入环境变量或密钥。
+    last_error = fields.TextField(null=True)
+    runtime_seen_at = fields.DatetimeField(null=True)
+    config_version = fields.CharField(max_length=100, default="v1")
     
     # 已同步的文件 ID 列表（JSON）
     synced_file_ids = fields.JSONField(default=list)

@@ -49,6 +49,11 @@ class SandboxBindingResponse(BaseModel):
     sandbox_id: str
     workspace_path: str
     is_active: bool
+    status: str
+    last_activity_at: Optional[datetime] = None
+    lease_expires_at: Optional[datetime] = None
+    release_attempts: int = 0
+    last_error: Optional[str] = None
     synced_file_ids: List[str]
     created_at: datetime
     updated_at: datetime

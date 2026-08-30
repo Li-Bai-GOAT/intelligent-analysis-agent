@@ -561,6 +561,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                     ...(data.attempt_index ? { attempt_index: data.attempt_index } : {}),
                     ...(typeof data.exit_code === 'number' ? { exit_code: data.exit_code } : {}),
                     ...(data.error_code ? { error_code: data.error_code } : {}),
+                    ...(data.termination_reason ? { termination_reason: data.termination_reason } : {}),
+                    ...(typeof data.termination_confirmed === 'boolean'
+                      ? { termination_confirmed: data.termination_confirmed }
+                      : {}),
                   }
               )
               : tool),

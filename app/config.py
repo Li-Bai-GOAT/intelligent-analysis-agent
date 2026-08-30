@@ -67,8 +67,14 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_BACKEND_URL: str = "redis://localhost:6379/2"
     CELERY_RESULT_EXPIRES: int = 3600  # 任务结果过期时间（秒）
-    CELERY_TASK_TIME_LIMIT: int = 1800  # 任务硬超时（30分钟）
-    CELERY_TASK_SOFT_TIME_LIMIT: int = 1500  # 任务软超时（25分钟，触发异常）
+    CELERY_TASK_TIME_LIMIT: int = 1560  # 顶层 deadline 后的进程级硬保险丝
+    CELERY_TASK_SOFT_TIME_LIMIT: int = 1530  # 留出 KunCode 终止确认窗口
+
+    # 单一、用户可见的任务 deadline。Celery hard/soft limit 只作为进程级
+    # 保险丝，模型、HTTP 与 KunCode 都使用这里生成的同一个绝对时间点。
+    TASK_DEADLINE_SECONDS: int = 1500
+    KUNCODE_TERMINATION_GRACE_SECONDS: float = 5.0
+    KUNCODE_TERMINATION_CONFIRM_SECONDS: float = 10.0
     
     # AI 模型 - 通用配置
     MODEL_PROVIDER: str = "deepseek"  # 模型提供商: deepseek, minimax, openai, anthropic
@@ -116,6 +122,18 @@ class Settings(BaseSettings):
     # 沙箱
     SANDBOX_BASE_URL: str = "http://localhost:10001"
     SANDBOX_BEARER_TOKEN: str = ""
+    # Persistent sandbox lifecycle settings.  The container manager pool is
+    # counted as part of the hard limit; it is not the limit by itself.
+    SANDBOX_IDLE_TIMEOUT_SECONDS: int = 7200
+    SANDBOX_LEASE_SECONDS: int = 1800
+    SANDBOX_CLEANUP_INTERVAL_SECONDS: int = 300
+    SANDBOX_MAX_ACTIVE_CONTAINERS: int = 8
+    SANDBOX_MAX_RELEASE_ATTEMPTS: int = 3
+    SANDBOX_ORPHAN_GRACE_SECONDS: int = 900
+    # Default to observation-only for containers that have no database fact.
+    # Idle bindings and explicit releases are still released automatically.
+    SANDBOX_AUTO_RELEASE_ORPHANS: bool = False
+    SANDBOX_CONFIG_VERSION: str = "deepseek-v1"
     # Comma-separated host environment names that MCP configuration is allowed
     # to reference with {{secret:NAME}}.  An empty list fails closed.
     MCP_SECRET_REFERENCE_ALLOWLIST: str = ""

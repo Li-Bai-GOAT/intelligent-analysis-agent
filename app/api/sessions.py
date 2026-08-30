@@ -333,6 +333,13 @@ async def delete_session(session_id: str, user: User = Depends(get_current_user)
     
     if not result["success"]:
         logger.warning(f"会话 {session_id} 清理部分失败: {result['errors']}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "会话未删除：沙箱释放尚未确认，可稍后重试",
+                "errors": result["errors"],
+            },
+        )
     
     logger.info(f"会话 {session_id} 删除完成: {result['deleted']}")
     

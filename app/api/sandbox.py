@@ -87,6 +87,82 @@ class SkillResponse(BaseModel):
     updated_at: str
 
 
+class SandboxReconcileRequest(BaseModel):
+    """Admins must explicitly opt in before an orphan scan can release."""
+
+    release_orphans: bool = False
+
+
+class SandboxReleaseResponse(BaseModel):
+    session_id: str
+    status: str
+    release_attempts: int
+    last_error: Optional[str] = None
+
+
+@router.get("/runtime", summary="查看沙箱生命周期运行态")
+async def get_sandbox_runtime(admin: User = Depends(get_admin_user)):
+    """Show persisted binding facts and a fresh, secret-free Runtime probe."""
+    from app.services.agent_service import AgentService
+
+    lifecycle = AgentService.get_instance().lifecycle_service
+    if lifecycle is None:
+        raise HTTPException(status_code=503, detail="Sandbox lifecycle service is unavailable")
+    return {"items": await lifecycle.runtime_snapshot()}
+
+
+@router.post("/reconcile", summary="协调沙箱持久状态与运行时")
+async def reconcile_sandboxes(
+    data: SandboxReconcileRequest,
+    admin: User = Depends(get_admin_user),
+):
+    """Run a read-only scan by default; release requires explicit confirmation."""
+    from app.services.agent_service import AgentService
+
+    lifecycle = AgentService.get_instance().lifecycle_service
+    if lifecycle is None:
+        raise HTTPException(status_code=503, detail="Sandbox lifecycle service is unavailable")
+    summary = await lifecycle.reconcile(
+        read_only=not data.release_orphans,
+        force_orphan_release=data.release_orphans,
+    )
+    return {"read_only": not data.release_orphans, "summary": summary}
+
+
+@router.post(
+    "/{session_id}/release",
+    response_model=SandboxReleaseResponse,
+    summary="安全释放会话沙箱",
+)
+async def release_sandbox(
+    session_id: str,
+    admin: User = Depends(get_admin_user),
+):
+    """Release only after confirming that no active task holds the lease."""
+    from app.services.agent_service import AgentService
+    from app.services.sandbox_lifecycle_service import SandboxUnavailableError
+
+    lifecycle = AgentService.get_instance().lifecycle_service
+    if lifecycle is None:
+        raise HTTPException(status_code=503, detail="Sandbox lifecycle service is unavailable")
+    try:
+        binding = await lifecycle.release(
+            session_id,
+            reason="admin_request",
+            retry_failed=True,
+        )
+    except SandboxUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if binding is None:
+        raise HTTPException(status_code=404, detail="Sandbox binding not found")
+    return SandboxReleaseResponse(
+        session_id=session_id,
+        status=binding.status,
+        release_attempts=binding.release_attempts,
+        last_error=binding.last_error,
+    )
+
+
 def parse_skill_md(content: str) -> dict:
     """解析 SKILL.md 的 YAML frontmatter"""
     match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)

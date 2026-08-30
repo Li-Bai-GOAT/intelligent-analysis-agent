@@ -1,5 +1,13 @@
 # Chat input visual QA
 
+> 类型：视觉 QA 报告
+>
+> 状态：阻塞
+>
+> 阻塞原因：缺少可复用的已登录浏览器状态，无法进入目标对话页面完成截图对比。
+>
+> 最后核验：2026-08-29
+
 ## Comparison target
 
 - Source visual truth: `C:\Users\ASUS\AppData\Local\Temp\codex-clipboard-ef8650b1-810f-462a-9042-a485e3276497.png`

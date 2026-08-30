@@ -44,9 +44,16 @@ from app.services.agent_service import (
     create_preview_plan_tool,
 )
 from agentscope.plan import SubTask
-from data_analysis_sandbox import _is_kuncode_failure
+from data_analysis_sandbox import (
+    DataAnalysisSandbox,
+    StreamingClient,
+    _is_kuncode_failure,
+)
 from app.services.sandbox_injection import SandboxInjectionService
-from app.services.sandbox_cleanup_service import SandboxCleanupService
+from app.services.sandbox_lifecycle_service import (
+    SandboxLifecycleService,
+    SandboxStatus,
+)
 from app.services.model_factory import RetryingStreamingModel
 from app.tasks import _local_tasks, start_local_task
 
@@ -66,9 +73,12 @@ class FakeRedis:
         self.values = {}
         self.expirations = {}
 
-    async def set(self, key, value, ex=None):
+    async def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.values:
+            return False
         self.values[key] = value
         self.expirations[key] = ex
+        return True
 
     async def get(self, key):
         return self.values.get(key)
@@ -78,6 +88,9 @@ class FakeRedis:
 
     async def delete(self, key):
         self.values.pop(key, None)
+
+    async def scan(self, cursor, match=None, count=None):
+        return 0, []
 
     async def aclose(self):
         return None
@@ -518,6 +531,126 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         cancelled = _build_terminal_tool_results({"call-1": "run_kuncode"}, status="cancelled")
         self.assertEqual(cancelled[0]["execution_status"], "cancelled")
 
+        timed_out = _build_terminal_tool_results(
+            {"call-1": "run_kuncode"},
+            status="timeout",
+        )
+        self.assertEqual(timed_out[0]["execution_status"], "failed")
+        self.assertEqual(timed_out[0]["termination_reason"], "timeout")
+
+    async def test_kuncode_terminal_reasons_are_structurally_distinct(self):
+        for reason, expected_status in (
+            ("timeout", "failed"),
+            ("cancelled", "cancelled"),
+            ("process_error", "failed"),
+        ):
+            event = _build_streamed_tool_result(
+                f"call-{reason}",
+                "terminal output",
+                outcome={
+                    "success": False,
+                    "exit_code": None,
+                    "error_code": f"KUNCODE_{reason.upper()}",
+                    "termination_reason": reason,
+                    "execution_id": "execution-1",
+                },
+                tool_name="run_kuncode",
+            )
+            self.assertEqual(event["execution_status"], expected_status)
+            self.assertEqual(event["termination_reason"], reason)
+            self.assertEqual(event["execution_id"], "execution-1")
+
+    async def test_sandbox_adapter_passes_execution_id_and_deadline(self):
+        captured = {}
+
+        async def fake_stream(url, json_data, headers=None, timeout_seconds=None):
+            captured.update({
+                "url": url,
+                "json": json_data,
+                "timeout_seconds": timeout_seconds,
+            })
+            yield {
+                "event": "kuncode_result",
+                "success": True,
+                "exit_code": 0,
+                "termination_reason": "completed",
+                "execution_id": "execution-1",
+            }
+
+        class FakeAdapter:
+            base_url = "http://sandbox-manager"
+            sandbox_id = "sandbox-1"
+            _bearer_token = "token"
+            _dataagent_execution_id = "execution-1"
+            _dataagent_deadline_at_ms = int(__import__("time").time() * 1000) + 30_000
+            _execution_context = DataAnalysisSandbox._execution_context
+            _get_sse_url = DataAnalysisSandbox._get_sse_url
+            _get_auth_headers = DataAnalysisSandbox._get_auth_headers
+
+        fake_sandbox = FakeAdapter()
+        with patch.object(StreamingClient, "stream_sse_async", new=fake_stream):
+            responses = [
+                response
+                async for response in DataAnalysisSandbox.run_kuncode(
+                    fake_sandbox,
+                    "analyze data",
+                )
+            ]
+
+        self.assertEqual(captured["json"]["execution_id"], "execution-1")
+        self.assertEqual(
+            captured["json"]["deadline_at_ms"],
+            fake_sandbox._dataagent_deadline_at_ms,
+        )
+        self.assertGreater(captured["timeout_seconds"], 0)
+        self.assertLessEqual(captured["timeout_seconds"], 37.0)
+        self.assertEqual(responses[-1].metadata["termination_reason"], "completed")
+
+    async def test_interrupt_waits_for_sandbox_termination_confirmation(self):
+        sandbox = SimpleNamespace(
+            cancel_kuncode=AsyncMock(return_value={
+                "execution_id": "execution-1",
+                "active": False,
+                "termination_reason": "cancelled",
+                "termination_confirmed": True,
+            }),
+            kuncode_process_status=AsyncMock(),
+        )
+        service = AgentService()
+        service._active_sandbox_runs["session-1"] = {
+            "sandbox": sandbox,
+            "execution_id": "execution-1",
+        }
+
+        result = await service._terminate_sandbox_execution(
+            "session-1",
+            termination_reason="cancelled",
+        )
+
+        self.assertTrue(result["termination_confirmed"])
+        sandbox.cancel_kuncode.assert_awaited_once()
+        self.assertEqual(
+            sandbox.cancel_kuncode.await_args.kwargs["termination_reason"],
+            "cancelled",
+        )
+
+    async def test_container_router_rejects_expired_deadline_before_spawn(self):
+        module = _load_kuncode_stream_module()
+        request = module.KunCodeRequest(
+            prompt="unused",
+            execution_id="expired-execution",
+            deadline_at_ms=1,
+        )
+        events = [
+            event
+            async for event in module._stream_kuncode_output(["unused"], request)
+        ]
+
+        self.assertIn('"termination_reason": "timeout"', "".join(events))
+        status = await module.kuncode_process_status("expired-execution")
+        self.assertFalse(status["active"])
+        self.assertTrue(status["termination_confirmed"])
+
     async def test_streamed_agentscope_data_output_is_a_completed_tool_result(self):
         event = _build_streamed_tool_result(
             "call-1",
@@ -819,118 +952,234 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         await service.clear_session_task("session-1", "new-task")
         self.assertIsNone(await service.get_session_task("session-1"))
 
-    async def test_idle_sandbox_release_uses_binding_owner_and_marks_inactive(self):
-        cleanup = SandboxCleanupService(idle_timeout_seconds=60)
-        cleanup._last_activity["session-1"] = datetime.now() - timedelta(minutes=5)
-        cleanup._session_users["session-1"] = "user-1"
-        sandbox_service = SimpleNamespace(release=Mock())
-        agent_service = SimpleNamespace(
-            sandbox_service=sandbox_service,
-            _active_agents={},
-            _redis=FakeRedis(),
-        )
-
-        with (
-            patch(
-                "app.services.agent_service.AgentService.get_instance",
-                return_value=agent_service,
-            ),
-            patch(
-                "app.repositories.file_repo.SandboxBindingRepository.update",
-                new=AsyncMock(),
-            ) as update_binding,
-        ):
-            await cleanup._cleanup_idle_sessions()
-
-        sandbox_service.release.assert_called_once_with("session-1", "user-1")
-        update_binding.assert_awaited_once_with("session-1", is_active=False)
-        self.assertNotIn("session-1", cleanup._last_activity)
-
-    async def test_active_task_prevents_idle_sandbox_release(self):
-        cleanup = SandboxCleanupService(idle_timeout_seconds=60)
-        cleanup._last_activity["session-1"] = datetime.now() - timedelta(minutes=5)
-        cleanup._session_users["session-1"] = "user-1"
-        sandbox_service = SimpleNamespace(release=Mock())
-        redis = FakeRedis()
-        redis.values["session_task:session-1"] = "task-1"
-        agent_service = SimpleNamespace(
-            sandbox_service=sandbox_service,
-            _active_agents={},
-            _redis=redis,
-        )
-
-        with patch(
-            "app.services.agent_service.AgentService.get_instance",
-            return_value=agent_service,
-        ):
-            await cleanup._cleanup_idle_sessions()
-
-        sandbox_service.release.assert_not_called()
-        self.assertIn("session-1", cleanup._last_activity)
-
-    async def test_startup_restores_active_sandbox_scope_from_database(self):
-        cleanup = SandboxCleanupService()
-        binding_time = datetime.now() - timedelta(hours=4)
-        session_time = datetime.now() - timedelta(minutes=30)
+    async def test_persisted_idle_binding_releases_after_timeout(self):
+        lifecycle = SandboxLifecycleService(idle_timeout_seconds=60)
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace()))
         binding = SimpleNamespace(
             session_id="session-1",
             user_id="user-1",
             sandbox_id="data-sandbox-1",
-            updated_at=binding_time,
+            status=SandboxStatus.IDLE,
+            last_activity_at=datetime.utcnow() - timedelta(minutes=5),
+            lease_expires_at=None,
+            updated_at=datetime.utcnow() - timedelta(minutes=5),
+            release_attempts=0,
         )
-        session = SimpleNamespace(
+        released = SimpleNamespace(status=SandboxStatus.RELEASED)
+
+        with (
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.list_by_statuses",
+                new=AsyncMock(return_value=[binding]),
+            ),
+            patch.object(lifecycle, "_verify_runtime", new=AsyncMock(return_value=True)),
+            patch.object(lifecycle, "_has_active_task", new=AsyncMock(return_value=False)),
+            patch.object(lifecycle, "release", new=AsyncMock(return_value=released)) as release,
+            patch.object(
+                lifecycle,
+                "_reconcile_runtime_orphans",
+                new=AsyncMock(return_value={"candidates": 0, "released": 0}),
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.update",
+                new=AsyncMock(),
+            ),
+        ):
+            summary = await lifecycle.reconcile()
+
+        release.assert_awaited_once_with("session-1", reason="idle_timeout")
+        self.assertEqual(summary["released"], 1)
+
+    async def test_active_task_prevents_persisted_idle_release(self):
+        lifecycle = SandboxLifecycleService(idle_timeout_seconds=60)
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace()))
+        binding = SimpleNamespace(
             session_id="session-1",
             user_id="user-1",
-            updated_at=session_time,
+            sandbox_id="data-sandbox-1",
+            status=SandboxStatus.IDLE,
+            last_activity_at=datetime.utcnow() - timedelta(minutes=5),
+            lease_expires_at=None,
+            updated_at=datetime.utcnow() - timedelta(minutes=5),
+            release_attempts=0,
         )
 
         with (
             patch(
-                "app.repositories.file_repo.SandboxBindingRepository.list_active",
+                "app.repositories.file_repo.SandboxBindingRepository.list_by_statuses",
                 new=AsyncMock(return_value=[binding]),
             ),
+            patch.object(lifecycle, "_verify_runtime", new=AsyncMock(return_value=True)),
+            patch.object(lifecycle, "_has_active_task", new=AsyncMock(return_value=True)),
+            patch.object(lifecycle, "release", new=AsyncMock()) as release,
+            patch.object(
+                lifecycle,
+                "_reconcile_runtime_orphans",
+                new=AsyncMock(return_value={"candidates": 0, "released": 0}),
+            ),
             patch(
-                "app.repositories.session_repo.SessionRepository.list_by_session_ids",
-                new=AsyncMock(return_value=[session]),
+                "app.repositories.file_repo.SandboxBindingRepository.update",
+                new=AsyncMock(),
             ),
         ):
-            await cleanup._restore_from_persisted_bindings()
+            await lifecycle.reconcile()
 
-        self.assertEqual(cleanup._session_users["session-1"], "user-1")
-        self.assertEqual(cleanup._last_activity["session-1"], session_time)
+        release.assert_not_awaited()
 
-    async def test_orphan_cleanup_uses_labels_and_preserves_bound_or_recent_sandboxes(self):
-        cleanup = SandboxCleanupService(idle_timeout_seconds=60)
-        cleanup._session_sandbox_ids["session-1"] = "data-sandbox-bound"
+    async def test_startup_reconcile_marks_missing_runtime_as_orphaned(self):
+        lifecycle = SandboxLifecycleService()
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace()))
+        binding = SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            sandbox_id="data-sandbox-1",
+            status=SandboxStatus.ACTIVE,
+            last_activity_at=datetime.utcnow(),
+            lease_expires_at=datetime.utcnow() + timedelta(minutes=30),
+            updated_at=datetime.utcnow(),
+            release_attempts=0,
+        )
+        update = AsyncMock()
+
+        with (
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.list_by_statuses",
+                new=AsyncMock(return_value=[binding]),
+            ),
+            patch.object(lifecycle, "_verify_runtime", new=AsyncMock(return_value=False)),
+            patch.object(
+                lifecycle,
+                "_reconcile_runtime_orphans",
+                new=AsyncMock(return_value={"candidates": 0, "released": 0}),
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.update",
+                new=update,
+            ),
+        ):
+            summary = await lifecycle.reconcile()
+
+        update.assert_awaited_once_with(
+            "session-1",
+            status=SandboxStatus.ORPHANED,
+            clear_lease=True,
+            last_error="Runtime sandbox is no longer reachable",
+        )
+        self.assertEqual(summary["orphaned_bindings"], 1)
+
+    async def test_release_is_idempotent_after_runtime_confirmation(self):
+        lifecycle = SandboxLifecycleService()
+        sandbox_service = SimpleNamespace(manager_api=SimpleNamespace(), release=Mock())
+        lifecycle.configure(sandbox_service)
+        binding = SimpleNamespace(status=SandboxStatus.RELEASED)
+
+        with patch(
+            "app.repositories.file_repo.SandboxBindingRepository.get_by_session",
+            new=AsyncMock(return_value=binding),
+        ):
+            released = await lifecycle.release("session-1", reason="repeat")
+
+        self.assertIs(released, binding)
+        sandbox_service.release.assert_not_called()
+
+    async def test_runtime_no_container_response_confirms_release(self):
+        lifecycle = SandboxLifecycleService()
+        lifecycle.configure(
+            SimpleNamespace(
+                manager_api=SimpleNamespace(
+                    get_info=Mock(
+                        return_value="Error: No container found with id: data-sandbox-1"
+                    )
+                )
+            )
+        )
+
+        self.assertFalse(await lifecycle._runtime_registration_exists("data-sandbox-1"))
+
+    async def test_concurrent_acquire_creates_one_persisted_binding(self):
+        lifecycle = SandboxLifecycleService()
+        sandbox = SimpleNamespace(sandbox_id="data-sandbox-1")
+        lifecycle.configure(
+            SimpleNamespace(manager_api=SimpleNamespace(), connect=Mock(return_value=[sandbox]))
+        )
+        binding = SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            sandbox_id="data-sandbox-1",
+            mount_dir="C:/mount/session-1",
+            status=SandboxStatus.ACTIVE,
+            config_version="deepseek-v1",
+            release_attempts=0,
+        )
+        state = {"binding": None}
+
+        async def get_binding(session_id):
+            return state["binding"]
+
+        async def create_binding(**kwargs):
+            await asyncio.sleep(0.01)
+            state["binding"] = binding
+            return binding
+
+        create = AsyncMock(side_effect=create_binding)
+
+        with (
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.get_by_session",
+                new=get_binding,
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.create",
+                new=create,
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.update",
+                new=AsyncMock(),
+            ),
+            patch.object(lifecycle, "_ensure_capacity", new=AsyncMock()),
+            patch.object(lifecycle, "_verify_runtime", new=AsyncMock(return_value=True)),
+            patch.object(lifecycle, "_get_mount_dir", new=AsyncMock(return_value=binding.mount_dir)),
+        ):
+            first, second = await asyncio.gather(
+                lifecycle.acquire("session-1", "user-1"),
+                lifecycle.acquire("session-1", "user-1"),
+            )
+
+        self.assertEqual(first.sandbox.sandbox_id, "data-sandbox-1")
+        self.assertEqual(second.sandbox.sandbox_id, "data-sandbox-1")
+        create.assert_awaited_once()
+
+    async def test_orphan_scan_requires_static_labels_and_explicit_confirmation(self):
+        lifecycle = SandboxLifecycleService(orphan_grace_seconds=60)
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace(release=Mock())))
         old_created = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-        recent_created = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
-        labels = json.dumps({
-            "maintainer": "kuncode-data-analysis-sandbox",
-            "description": "Data Analysis Sandbox with KunCode AI",
-        })
+        labels = json.dumps({"app": "dataagent", "sandbox_type": "data_analysis"})
         commands = []
 
         def run_docker(arguments):
             commands.append(arguments)
             if arguments[0] == "ps":
-                return "bound-id\norphan-id\nrecent-id\n"
+                return "orphan-id\n"
             if arguments[0] == "inspect":
-                container_id = arguments[-1]
-                if container_id == "bound-id":
-                    return f"bound-id|/data-sandbox-bound|{old_created}|{labels}\n"
-                if container_id == "orphan-id":
-                    return f"orphan-id|/data-sandbox-orphan|{old_created}|{labels}\n"
-                return f"recent-id|/data-sandbox-recent|{recent_created}|{labels}\n"
+                return f"orphan-id|/data-sandbox-orphan|{old_created}|{labels}\n"
             if arguments[0] == "rm":
                 return "orphan-id\n"
             self.fail(f"Unexpected Docker arguments: {arguments}")
 
         with (
-            patch.object(cleanup, "_has_any_active_task", new=AsyncMock(return_value=False)),
-            patch.object(cleanup, "_run_docker", side_effect=run_docker),
+            patch.object(lifecycle, "_has_any_active_task", new=AsyncMock(return_value=False)),
+            patch.object(lifecycle, "_run_docker", side_effect=run_docker),
         ):
-            await cleanup._cleanup_orphan_runtime_containers()
+            readonly = await lifecycle._reconcile_runtime_orphans(
+                [], read_only=True, allow_release=False
+            )
+            confirmed = await lifecycle._reconcile_runtime_orphans(
+                [], read_only=False, allow_release=True
+            )
 
+        self.assertEqual(readonly["candidates"], 1)
+        self.assertEqual(readonly["released"], 0)
+        self.assertEqual(confirmed["released"], 1)
         self.assertIn(["rm", "-f", "orphan-id"], commands)
 
     async def test_session_owner_rejects_unknown_session(self):

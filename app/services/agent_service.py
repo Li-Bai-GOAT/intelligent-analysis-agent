@@ -151,11 +151,19 @@ def _normalize_kuncode_outcome(value: Any) -> dict[str, Any] | None:
             exit_code = int(exit_code)
         except (TypeError, ValueError):
             exit_code = None
+    termination_reason = value.get("termination_reason")
+    if termination_reason not in {"completed", "timeout", "cancelled", "process_error"}:
+        if value.get("cancelled"):
+            termination_reason = "cancelled"
+        else:
+            termination_reason = "completed" if value.get("success") else "process_error"
     return {
         "success": bool(value.get("success")),
-        "cancelled": bool(value.get("cancelled")),
+        "cancelled": termination_reason == "cancelled",
         "exit_code": exit_code,
         "error_code": str(value["error_code"]) if value.get("error_code") else None,
+        "termination_reason": termination_reason,
+        "execution_id": str(value["execution_id"]) if value.get("execution_id") else None,
     }
 
 
@@ -183,6 +191,8 @@ def _encode_kuncode_outcome_marker(outcome: dict[str, Any]) -> str:
         "cancelled": normalized["cancelled"],
         "exit_code": normalized["exit_code"],
         "error_code": normalized["error_code"],
+        "termination_reason": normalized["termination_reason"],
+        "execution_id": normalized["execution_id"],
     }
     return (
         f"\n{KUNCODE_OUTCOME_MARKER_PREFIX}"
@@ -314,17 +324,24 @@ def _build_terminal_tool_results(
 ) -> list[dict]:
     """Close tool calls that never received a real streamed result."""
     cancelled = status == "cancelled"
+    timeout = status == "timeout"
+    termination_reason = "cancelled" if cancelled else "timeout" if timeout else "process_error"
     return [
         {
             "type": "tool_result",
             "content": (
                 f"[CANCELLED] {tool_name or '工具'} 已中断。"
                 if cancelled
+                else f"[TIMEOUT] {tool_name or '工具'} 超过统一执行时限。"
+                if timeout
                 else f"[ERROR] {tool_name or '工具'} 未返回完整执行结果。"
             ),
             "tool_id": tool_id,
             "phase": "cancelled" if cancelled else "failed",
             "execution_status": "cancelled" if cancelled else "failed",
+            "termination_reason": termination_reason,
+            "success": False,
+            "cancelled": cancelled,
         }
         for tool_id, tool_name in pending_tool_calls.items()
         if tool_id
@@ -348,7 +365,7 @@ def _build_streamed_tool_result(
     )
     terminal_outcome = _normalize_kuncode_outcome(outcome) or marker_outcome
     if terminal_outcome is not None:
-        if terminal_outcome["cancelled"]:
+        if terminal_outcome["termination_reason"] == "cancelled":
             execution_status = "cancelled"
         elif terminal_outcome["success"]:
             execution_status = "completed"
@@ -1061,9 +1078,16 @@ def create_preview_plan_tool(
 
 
 from app.config import settings  # noqa: E402
+from app.services.execution_deadline import (  # noqa: E402
+    ExecutionDeadline,
+    ExecutionDeadlineExceeded,
+)
 from app.services.postgres_session_history import PostgresSessionHistoryService  # noqa: E402
 from app.services.postgres_state_service import PostgresStateService  # noqa: E402
-from app.services.sandbox_cleanup_service import get_cleanup_service, SandboxCleanupService  # noqa: E402
+from app.services.sandbox_lifecycle_service import (  # noqa: E402
+    SandboxLifecycleService,
+    get_lifecycle_service,
+)
 
 # 导入自定义沙箱扩展，触发 @SandboxRegistry.register 装饰器
 import data_analysis_sandbox  # noqa: F401, E402
@@ -1142,11 +1166,12 @@ class AgentService:
         self.session_service: Optional[PostgresSessionHistoryService] = None
         self.state_service: Optional[PostgresStateService] = None
         self.sandbox_service: Optional[SandboxService] = None
-        self.cleanup_service: Optional[SandboxCleanupService] = None
+        self.lifecycle_service: Optional[SandboxLifecycleService] = None
         self.system_prompt: str = ""
         self._redis: Optional[aioredis.Redis] = None
         self._started = False
         self._active_agents: Dict[str, Any] = {}  # session_id -> agent
+        self._active_sandbox_runs: Dict[str, Dict[str, Any]] = {}
     
     @classmethod
     def get_instance(cls) -> "AgentService":
@@ -1214,12 +1239,11 @@ class AgentService:
         # Redis 连接（用于任务流）
         self._redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
         
-        # 启动沙箱空闲清理服务（空闲 1 小时后自动释放）
-        self.cleanup_service = get_cleanup_service(
-            idle_timeout_seconds=7200,   # 2 小时空闲超时
-            scan_interval_seconds=300,   # 每 5 分钟扫描一次
-        )
-        await self.cleanup_service.start()
+        # Lifecycle facts and task leases are persisted in PostgreSQL. Runtime
+        # and Redis are operational observations, not lifecycle truth.
+        self.lifecycle_service = get_lifecycle_service()
+        self.lifecycle_service.configure(self.sandbox_service, self._redis)
+        await self.lifecycle_service.start()
         
         self._started = True
         print("[AgentService] 服务已启动")
@@ -1229,11 +1253,11 @@ class AgentService:
         if not self._started:
             return
         
+        if self.lifecycle_service:
+            await self.lifecycle_service.stop()
         await self.session_service.stop()
         await self.state_service.stop()
         await self.sandbox_service.stop()
-        if self.cleanup_service:
-            await self.cleanup_service.stop()
         if self._redis:
             await self._redis.aclose()
         
@@ -1725,6 +1749,7 @@ class AgentService:
                 "success": False,
                 "exit_code": None,
                 "error_code": "KUNCODE_STREAM_INCOMPLETE",
+                "termination_reason": "process_error",
             }
             logger.exception("Direct KunCode execution failed: session=%s", session_id)
         else:
@@ -1734,6 +1759,7 @@ class AgentService:
                     "success": False,
                     "exit_code": None,
                     "error_code": "KUNCODE_EMPTY_OUTPUT",
+                    "termination_reason": "process_error",
                 }
 
         is_error = _tool_output_failed(accumulated_output, terminal_outcome)
@@ -1741,13 +1767,18 @@ class AgentService:
             "success": not is_error,
             "exit_code": None,
             "error_code": "KUNCODE_TEXT_FALLBACK" if is_error else None,
+            "termination_reason": "process_error" if is_error else "completed",
         }
+        termination_reason = terminal_outcome.get("termination_reason")
         generated_files = _extract_workspace_files(accumulated_output)
-        final_message = (
-            "KunCode 执行失败，请查看终端输出。"
-            if is_error
-            else _build_kuncode_completion_message(generated_files)
-        )
+        if termination_reason == "cancelled":
+            final_message = "KunCode 已取消，容器内执行进程已停止。"
+        elif termination_reason == "timeout":
+            final_message = "KunCode 已超过统一执行时限并停止。"
+        elif is_error:
+            final_message = "KunCode 执行失败，请查看终端输出。"
+        else:
+            final_message = _build_kuncode_completion_message(generated_files)
 
         # The streaming chunks above are progress updates. Emit one explicit
         # final result so clients can stop the tool spinner deterministically.
@@ -1796,10 +1827,71 @@ class AgentService:
             )
 
         yield {
-            "type": "error" if is_error else "text",
+            "type": "interrupted" if termination_reason == "cancelled" else "error" if is_error else "text",
             "content": final_message,
             "generated_files": generated_files,
+            "termination_reason": termination_reason,
         }
+
+    async def _terminate_sandbox_execution(
+        self,
+        session_id: str,
+        *,
+        termination_reason: str,
+    ) -> dict[str, Any]:
+        """Stop the active KunCode process and return verified terminal state."""
+        active = self._active_sandbox_runs.get(session_id)
+        if not active:
+            return {
+                "active": False,
+                "termination_reason": termination_reason,
+                "termination_confirmed": True,
+                "already_stopped": True,
+            }
+        sandbox = active["sandbox"]
+        execution_id = active["execution_id"]
+        sandbox_id = getattr(sandbox, "sandbox_id", None)
+        if not hasattr(sandbox, "cancel_kuncode"):
+            return {
+                "execution_id": execution_id,
+                "active": False,
+                "termination_reason": termination_reason,
+                "termination_confirmed": False,
+                "error": "sandbox adapter does not support cancellation confirmation",
+            }
+        try:
+            result = await sandbox.cancel_kuncode(
+                execution_id,
+                grace_seconds=settings.KUNCODE_TERMINATION_GRACE_SECONDS,
+                confirmation_timeout=settings.KUNCODE_TERMINATION_CONFIRM_SECONDS,
+                termination_reason=termination_reason,
+            )
+            if result.get("termination_confirmed"):
+                return {**result, "sandbox_id": sandbox_id}
+
+            confirm_deadline = (
+                time.monotonic() + settings.KUNCODE_TERMINATION_CONFIRM_SECONDS
+            )
+            while time.monotonic() < confirm_deadline:
+                status = await sandbox.kuncode_process_status(execution_id)
+                if not status.get("active") and status.get("termination_confirmed"):
+                    return {**result, **status, "sandbox_id": sandbox_id}
+                await asyncio.sleep(0.1)
+            return {**result, "sandbox_id": sandbox_id}
+        except Exception as exc:
+            logger.exception(
+                "KunCode termination confirmation failed: session=%s execution=%s",
+                session_id,
+                execution_id,
+            )
+            return {
+                "execution_id": execution_id,
+                "sandbox_id": sandbox_id,
+                "active": True,
+                "termination_reason": termination_reason,
+                "termination_confirmed": False,
+                "error": str(exc),
+            }
     
     async def chat(
         self,
@@ -1824,13 +1916,28 @@ class AgentService:
         if not self._started:
             yield {"type": "error", "content": "服务未启动"}
             return
+
+        deadline = ExecutionDeadline.create(settings.TASK_DEADLINE_SECONDS)
         
         # 等待预压缩完成（如果正在进行）
         from app.api.sessions import is_compressing, wait_for_compression
         if session_id and await is_compressing(session_id):
             logger.info(f"等待会话 {session_id} 预压缩完成...")
             yield {"type": "status", "content": "正在压缩历史上下文，请稍候..."}
-            await wait_for_compression(session_id, timeout=180.0)
+            try:
+                await wait_for_compression(
+                    session_id,
+                    timeout=min(180.0, deadline.require_remaining()),
+                )
+            except (asyncio.TimeoutError, ExecutionDeadlineExceeded):
+                yield {
+                    "type": "error",
+                    "content": "等待上下文压缩时超过统一执行时限",
+                    "termination_reason": "timeout",
+                    "execution_id": deadline.execution_id,
+                    "termination_confirmed": True,
+                }
+                return
             logger.info(f"会话 {session_id} 预压缩完成，继续执行")
         
         if not session_id:
@@ -1838,16 +1945,41 @@ class AgentService:
             return
         
         # 连接或创建沙箱，处理文件迁移
-        result = await self._connect_or_create_sandbox(session_id, user_id, file_ids)
+        try:
+            async with asyncio.timeout(deadline.require_remaining()):
+                result = await self._connect_or_create_sandbox(
+                    session_id,
+                    user_id,
+                    file_ids,
+                )
+        except asyncio.TimeoutError as exc:
+            yield {
+                "type": "error",
+                "content": "准备沙箱时超过统一执行时限",
+                "termination_reason": "timeout",
+                "execution_id": deadline.execution_id,
+                "termination_confirmed": True,
+            }
+            return
         if not result or not result[0]:
             yield {"type": "error", "content": "无法创建沙箱实例"}
             return
         
         sandbox, sandbox_recreated = result
+        if hasattr(sandbox, "configure_execution_context"):
+            sandbox.configure_execution_context(
+                execution_id=deadline.execution_id,
+                deadline_at_ms=deadline.deadline_at_ms,
+            )
+        self._active_sandbox_runs[session_id] = {
+            "sandbox": sandbox,
+            "execution_id": deadline.execution_id,
+            "deadline_at_ms": deadline.deadline_at_ms,
+        }
         
-        # 更新会话活跃时间（用于空闲超时检测）
-        if self.cleanup_service:
-            self.cleanup_service.touch(session_id, user_id, sandbox.sandbox_id)
+        # Keep the task lease alive independently of Redis so a long KunCode
+        # stream cannot be reclaimed merely because this process is quiet.
+        lease_heartbeat_task = self._start_sandbox_lease_heartbeat(session_id)
         
         try:
             if sandbox_recreated:
@@ -1941,11 +2073,17 @@ class AgentService:
             async def stream_producer():
                 """生产者：从 agent 获取流式消息并放入队列"""
                 try:
-                    async for stream_msg, is_last_chunk in stream_printing_messages(
-                        agents=[agent],
-                        coroutine_task=agent(msg),
-                    ):
-                        await stream_queue.put((stream_msg, is_last_chunk))
+                    try:
+                        async with asyncio.timeout(deadline.require_remaining()):
+                            async for stream_msg, is_last_chunk in stream_printing_messages(
+                                agents=[agent],
+                                coroutine_task=agent(msg),
+                            ):
+                                await stream_queue.put((stream_msg, is_last_chunk))
+                    except asyncio.TimeoutError as exc:
+                        raise ExecutionDeadlineExceeded(
+                            "模型/工具执行超过统一执行时限"
+                        ) from exc
                 except asyncio.CancelledError:
                     logger.info(f"[流式生产者] 被中断取消: {session_id}")
                     raise
@@ -2244,6 +2382,21 @@ class AgentService:
             
             yield {"type": "end", "content": "对话完成", "session_id": session_id}
         
+        except ExecutionDeadlineExceeded as e:
+            termination = await self._terminate_sandbox_execution(
+                session_id,
+                termination_reason="timeout",
+            )
+            pending = locals().get("pending_tool_calls", {})
+            for terminal_event in _build_terminal_tool_results(pending, status="timeout"):
+                yield terminal_event
+            yield {
+                "type": "error",
+                "content": str(e),
+                "termination_reason": "timeout",
+                "execution_id": deadline.execution_id,
+                "termination_confirmed": termination.get("termination_confirmed", False),
+            }
         except Exception as e:
             import traceback
             error_msg = str(e) or f"{type(e).__name__}: {traceback.format_exc()}"
@@ -2253,6 +2406,15 @@ class AgentService:
         finally:
             # 清理活跃代理
             self._active_agents.pop(session_id, None)
+            self._active_sandbox_runs.pop(session_id, None)
+            if lease_heartbeat_task:
+                lease_heartbeat_task.cancel()
+                try:
+                    await lease_heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            if self.lifecycle_service:
+                await self.lifecycle_service.mark_idle(session_id)
         
         # 注意：不调用 release()，保持沙箱运行以便后续对话复用
         # 沙箱会根据 SandboxManager 的配置自动超时清理
@@ -2293,7 +2455,11 @@ class AgentService:
                 if cursor == 0:
                     break
     
-    async def interrupt_agent(self, session_id: str, user_id: Optional[str] = None) -> bool:
+    async def interrupt_agent(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> dict[str, Any]:
         """中断正在执行的代理
         
         通过 Redis 设置中断信号，Celery worker 中的代理会检查并响应
@@ -2305,7 +2471,13 @@ class AgentService:
         Returns:
             是否成功设置中断信号
         """
-        # 先尝试直接中断（如果代理在当前进程中）
+        # 先终止并确认容器内进程，再向上层代理/任务广播取消。
+        termination = await self._terminate_sandbox_execution(
+            session_id,
+            termination_reason="cancelled",
+        )
+
+        # 再尝试直接中断（如果代理在当前进程中）
         agent = self._active_agents.get(session_id)
         if agent and hasattr(agent, 'interrupt'):
             await agent.interrupt()
@@ -2335,7 +2507,16 @@ class AgentService:
             await self.write_task_stream(task_id, {"type": "interrupted", "content": "用户中断了执行"})
             await self.write_task_stream(task_id, {"type": "end", "content": "已中断"})
         
-        return True
+        return {
+            "success": True,
+            "termination_reason": "cancelled",
+            "execution_id": termination.get("execution_id"),
+            "sandbox_id": termination.get("sandbox_id"),
+            "termination_confirmed": bool(
+                termination.get("termination_confirmed")
+            ),
+            "termination_error": termination.get("error"),
+        }
     
     async def check_interrupt(self, session_id: str) -> bool:
         """检查是否有中断信号"""
@@ -2562,6 +2743,31 @@ class AgentService:
         finally:
             await redis_client.aclose()
     
+    def _start_sandbox_lease_heartbeat(self, session_id: str) -> Optional[asyncio.Task]:
+        """Renew the durable task lease until this chat generator exits."""
+        if not self.lifecycle_service:
+            return None
+
+        async def renew() -> None:
+            interval = max(
+                1,
+                min(self.lifecycle_service.lease_duration.total_seconds() / 3, 60),
+            )
+            try:
+                while True:
+                    await asyncio.sleep(interval)
+                    await self.lifecycle_service.heartbeat(session_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "Sandbox lease heartbeat failed: session=%s error=%s",
+                    session_id,
+                    error,
+                )
+
+        return asyncio.create_task(renew())
+
     async def _connect_or_create_sandbox(self, session_id: str, user_id: str, file_ids: List[str] = None):
         """
         连接或创建沙箱，处理沙箱重建时的文件迁移
@@ -2574,52 +2780,31 @@ class AgentService:
         5. 更新绑定关系
         6. 注入 Agent/Skill/MCP 配置到沙箱
         """
-        from app.repositories.file_repo import SandboxBindingRepository
         from app.services.sandbox_injection import get_injection_service
-        
-        # 获取旧绑定信息
-        old_binding = await SandboxBindingRepository.get_by_session(session_id)
-        old_mount_dir = old_binding.mount_dir if old_binding else None
-        old_sandbox_id = old_binding.sandbox_id if old_binding else None
-        
-        # 连接沙箱
-        sandboxes = self.sandbox_service.connect(
-            session_id=session_id,
-            user_id=user_id,
-            sandbox_types=["data_analysis"],
-        )
-        
-        if not sandboxes:
-            return None, False
-        
-        sandbox = sandboxes[0]
-        
-        # 获取新沙箱的挂载目录
-        new_mount_dir = await self._get_sandbox_mount_dir(sandbox)
-        
-        # 检查是否沙箱重建
-        sandbox_recreated = old_sandbox_id and old_sandbox_id != sandbox.sandbox_id
-        
-        if sandbox_recreated and old_mount_dir:
+        if not self.lifecycle_service:
+            raise RuntimeError("Sandbox lifecycle service is not started")
+
+        acquired = await self.lifecycle_service.acquire(session_id, user_id)
+        sandbox = acquired.sandbox
+        new_mount_dir = acquired.binding.mount_dir
+        sandbox_recreated = acquired.recreated
+
+        if sandbox_recreated and acquired.previous_mount_dir:
             # 沙箱重建，迁移旧沙箱的所有文件到新沙箱
-            await self._migrate_sandbox_files(old_mount_dir, new_mount_dir)
+            await self._migrate_sandbox_files(
+                acquired.previous_mount_dir,
+                new_mount_dir,
+            )
         
         # 同步本次对话新上传的文件
         await self._sync_new_files_to_sandbox(session_id, new_mount_dir, file_ids)
-        
-        # 更新绑定关系
-        await self._update_sandbox_binding(
-            user_id=user_id,
-            session_id=session_id,
-            sandbox_id=sandbox.sandbox_id,
-            mount_dir=new_mount_dir,
-        )
         
         # 注入 Agent/Skill/MCP 配置到沙箱容器
         try:
             injection_service = get_injection_service()
             inject_result = await injection_service.inject_all(sandbox.sandbox_id)
             if inject_result.get("success"):
+                await self.lifecycle_service.record_configuration(session_id, success=True)
                 logger.info(f"沙箱配置注入成功: agents={inject_result.get('agents', {}).get('injected', [])}, "
                            f"skills={inject_result.get('skills', {}).get('injected', [])}, "
                            f"mcps={inject_result.get('mcps', {}).get('injected', [])}")
@@ -2701,12 +2886,12 @@ class AgentService:
         
         binding = await SandboxBindingRepository.get_by_session(session_id)
         if binding:
-            if binding.sandbox_id != sandbox_id or not binding.is_active:
+            if binding.sandbox_id != sandbox_id or binding.status not in {"ACTIVE", "IDLE"}:
                 await SandboxBindingRepository.update(
                     session_id=session_id,
                     sandbox_id=sandbox_id,
                     mount_dir=mount_dir,
-                    is_active=True,
+                    status="ACTIVE",
                 )
         else:
             await SandboxBindingRepository.create(

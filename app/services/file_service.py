@@ -112,7 +112,7 @@ class SandboxFileService:
                     session_id=session_id,
                     sandbox_id=sandbox_id,
                     workspace_path=workspace_path,
-                    is_active=True,
+                    status="ACTIVE",
                 )
                 binding = await SandboxBindingRepository.get_by_session(session_id)
         else:

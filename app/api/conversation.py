@@ -200,6 +200,11 @@ class InterruptResponse(BaseModel):
     """中断响应"""
     success: bool
     message: str
+    termination_reason: str | None = None
+    execution_id: str | None = None
+    sandbox_id: str | None = None
+    termination_confirmed: bool = False
+    termination_error: str | None = None
 
 
 @router.post("/session/{session_id}/interrupt", response_model=InterruptResponse, summary="中断代理执行")
@@ -212,10 +217,16 @@ async def interrupt_session(
     agent_service = AgentService.get_instance()
     await agent_service.start()
     
-    success = await agent_service.interrupt_agent(session_id, user_id=user.id)
+    result = await agent_service.interrupt_agent(session_id, user_id=user.id)
     
-    if success:
-        return InterruptResponse(success=True, message="代理已中断，等待用户输入")
+    if result.get("success"):
+        confirmed = bool(result.get("termination_confirmed"))
+        message = (
+            "代理已中断，容器内进程终止已确认"
+            if confirmed
+            else "代理已中断，但容器内进程终止确认失败"
+        )
+        return InterruptResponse(message=message, **result)
     else:
         return InterruptResponse(success=False, message="没有正在执行的代理或中断失败")
 
