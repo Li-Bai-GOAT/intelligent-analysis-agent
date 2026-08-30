@@ -9,7 +9,7 @@ export function InputArea() {
   const [executionMode, setExecutionMode] = useState<'auto' | 'kuncode'>('auto')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const { sendMessage, pendingFiles, addPendingFiles, removePendingFile, isStreaming, contextInfo, disconnectStream, currentSession, streamState } = useSessionStore()
+  const { sendMessage, pendingFiles, addPendingFiles, removePendingFile, isStreaming, contextInfo, interruptCurrentTask, currentSession, streamState } = useSessionStore()
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -139,14 +139,14 @@ export function InputArea() {
         )}
 
         <button
-          onClick={isStreaming ? disconnectStream : () => void handleSend()}
+          onClick={isStreaming ? () => void interruptCurrentTask() : () => void handleSend()}
           disabled={!isStreaming && (!text.trim() || !currentSession)}
           className={`inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${isMultiline ? 'self-end' : ''}
             ${isStreaming
               ? 'bg-error/15 text-error border border-error/30 hover:bg-error/25'
               : 'bg-accent text-bg-base hover:bg-accent-hover shadow-[0_2px_8px_rgba(45,212,168,0.25)]'
             }`}
-          title={isStreaming ? '暂停' : '发送'}
+          title={isStreaming ? '中断' : '发送'}
         >
           {isStreaming ? <Square size={16} /> : <Send size={17} />}
         </button>

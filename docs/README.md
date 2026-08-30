@@ -25,8 +25,8 @@
 | 专项 | 状态 | 剩余验收 |
 | --- | --- | --- |
 | [单轮对话聚合与结束态](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 已验证 | 前端自动化回归 |
-| [普通用户后台只读访问](plans/read-only-admin-access-plan.md) | 已验证 | 浏览器权限矩阵 |
-| [计划面板实时更新](plans/plan-panel-realtime-update-plan.md) | 已实施 | 刷新、重连和会话切换 E2E |
+| [普通用户后台只读访问](plans/read-only-admin-access-plan.md) | 已归档 | 无 |
+| [计划面板实时更新](plans/plan-panel-realtime-update-plan.md) | 已实施 | 多会话切换 E2E |
 | [数据 Skill / 知识库 E2E](plans/data-skill-knowledge-e2e-plan.md) | 有条件通过 | 后台 UI、Skill deny 负向用例 |
 
 ## 历史基线
@@ -43,6 +43,7 @@
 
 | 报告 | 状态 |
 | --- | --- |
+| [核心浏览器 E2E 验收](reports/core-browser-e2e-validation.md) | 已验证；9 项确定性用例与 3 项真实服务冒烟通过。 |
 | [数据 Skill / 知识库 E2E 验收](reports/data-skill-knowledge-e2e-validation.md) | 有条件通过；历史真实接口与沙箱证据。 |
 | [聊天输入视觉 QA](reports/chat-input-visual-qa.md) | 被认证状态阻塞，尚未完成登录后视觉对比。 |
 

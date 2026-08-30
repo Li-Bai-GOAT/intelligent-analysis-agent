@@ -151,6 +151,7 @@ interface SessionState {
   loadPendingPreview: (sessionId?: string) => Promise<void>
   handleStreamData: (data: StreamData) => void
   disconnectStream: () => void
+  interruptCurrentTask: () => Promise<void>
   addMessage: (msg: Message) => void
   updateLastAssistant: (content: string) => void
   appendToLastAssistant: (content: string) => void
@@ -746,6 +747,42 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         get,
         get().loadPendingPreview,
       )
+    }
+  },
+
+  interruptCurrentTask: async () => {
+    const state = get()
+    if (!state.currentSession || !state.isStreaming) return
+
+    try {
+      const result = await Api.interruptSession(state.currentSession) as {
+        success?: boolean
+        message?: string
+        termination_confirmed?: boolean
+      }
+      if (!result.success) throw new Error(result.message || '中断失败')
+
+      // The stream normally delivers `interrupted` before this response. Apply
+      // the same terminal state locally when that event races with disconnect,
+      // so the UI never remains running after the API has confirmed cancellation.
+      if (get().isStreaming) {
+        get().handleStreamData({
+          type: 'interrupted',
+          content: result.message || '用户中断了执行',
+          termination_confirmed: result.termination_confirmed,
+        } as StreamData)
+      }
+      get().disconnectStream()
+    } catch (error) {
+      set((current) => ({
+        messages: [
+          ...current.messages,
+          {
+            role: 'system',
+            content: error instanceof Error ? `中断失败：${error.message}` : '中断失败，请重试。',
+          },
+        ],
+      }))
     }
   },
 }))

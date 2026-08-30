@@ -2,7 +2,7 @@
 
 > 状态：当前规划入口
 >
-> 最后核验：2026-08-29
+> 最后核验：2026-08-30
 >
 > 适用基线：`main` 当前工作区、现有自动化测试与静态构建结果
 
@@ -10,10 +10,11 @@
 
 ## 1. 当前验证基线
 
-- 后端：54 项任务流、后台只读和 MCP 密钥引用回归通过。
+- 后端：52 项任务流回归通过。
 - 前端：ESLint 与 TypeScript/Vite 生产构建通过。
+- 浏览器：9 项确定性 Chromium E2E 通过，覆盖登录、会话、成功/失败/中断、HITL 确认、SSE 重连、文件交付和权限矩阵。
+- 在线：真实 8090 服务 3 项浏览器冒烟通过（登录/会话/简单问题、普通用户只读 403、管理员写控件）；临时账号和会话已清理。
 - 构建警告：主 JavaScript 产物约 1.94 MB，仍需后续拆包。
-- 在线状态：2026-08-29 核验时 `8090` 未启动，本轮没有完成最新在线 E2E；历史 E2E 证据不能替代当前版本运行验收。
 
 ## 2. 当前 P0
 
@@ -22,7 +23,8 @@
 | 1 | 正式数据库迁移与备份恢复 | 历史整改剩余项 | 固化当前 schema；生产关闭自动建表；升级、回滚、恢复流程可重复验证。 |
 | 2 | 沙箱生命周期持久化与幂等释放 | [沙箱生命周期专项](plans/sandbox-container-lifecycle-design.md) | 生命周期、最后活动、租约、重试和错误进入 PostgreSQL；重启/异常后可恢复；不会误回收活跃任务。 |
 | 3 | 统一超时、取消与容器子进程终止 | 历史整改、KunCode 运行时专项 | 顶层 deadline 向下传递；取消后容器内无残留进程；明确区分 timeout/cancelled/process_error。 |
-| 4 | 核心浏览器 E2E | 多份已实施计划的共同缺口 | 自动覆盖登录、成功/失败/中断、计划与 KunCode 确认、SSE 重连、文件交付和权限矩阵。 |
+
+2026-08-30 已完成原第 4 项“核心浏览器 E2E”；实现和验证证据见[核心浏览器 E2E 验收报告](reports/core-browser-e2e-validation.md)。
 
 ## 3. 当前 P1
 
@@ -46,8 +48,8 @@
 | 专项 | 状态 | 估算完成度 | 后续处理 |
 | --- | --- | ---: | --- |
 | [单轮对话聚合与结束态](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 已验证 | 95% | 保留为实施记录；补前端自动化后归档。 |
-| [普通用户后台只读访问](plans/read-only-admin-access-plan.md) | 已验证 | 95% | 保留为实施记录；补浏览器权限矩阵后归档。 |
-| [计划面板实时更新](plans/plan-panel-realtime-update-plan.md) | 已实施，待最新 E2E | 90% | 补刷新、重连、会话切换自动化。 |
+| [普通用户后台只读访问](plans/read-only-admin-access-plan.md) | 已归档 | 100% | 真实普通用户/管理员浏览器权限矩阵已通过。 |
+| [计划面板实时更新](plans/plan-panel-realtime-update-plan.md) | 已实施，待会话切换 E2E | 92% | 已覆盖计划恢复与 SSE 重连；补多会话切换自动化。 |
 | [数据 Skill / 知识库 E2E](plans/data-skill-knowledge-e2e-plan.md) | 有条件通过 | 90% | 补后台 UI 和 Skill deny 负向用例。 |
 | [KunCode 终端与运行时 UX](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 已实施，待最新 E2E | 88% | 保留 P1 安全/性能尾项。 |
 | [项目缺陷整改指导](plans/project-remediation-guide.md) | 历史基线 | 约80% | 不再直接排期；剩余项已迁入本路线图。 |

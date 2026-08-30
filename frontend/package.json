@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test --grep-invert @live",
+    "test:e2e:live": "playwright test --grep @live"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.1",
@@ -27,6 +29,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
