@@ -54,7 +54,10 @@ class Settings(BaseSettings):
     DB_USER: str = "postgres"
     DB_PASSWORD: str = ""
     DB_NAME: str = "rca_agent"
-    DB_AUTO_CREATE_SCHEMA: bool = True
+    # Schema changes are managed by Aerich. Set this to true only when
+    # bootstrapping a disposable development database, never for an existing
+    # or production database.
+    DB_AUTO_CREATE_SCHEMA: bool = False
     
     @property
     def DATABASE_URL(self) -> str:

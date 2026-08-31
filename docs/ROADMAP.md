@@ -10,27 +10,30 @@
 
 ## 1. 当前验证基线
 
-- 后端：52 项任务流回归通过。
-- 前端：ESLint 与 TypeScript/Vite 生产构建通过。
-- 浏览器：9 项确定性 Chromium E2E 通过，覆盖登录、会话、成功/失败/中断、HITL 确认、SSE 重连、文件交付和权限矩阵。
-- 在线：真实 8090 服务 3 项浏览器冒烟通过（登录/会话/简单问题、普通用户只读 403、管理员写控件）；临时账号和会话已清理。
+- 后端：2026-08-30 复核 72 项，其中 69 项通过；3 项 Linux/POSIX 进程组集成测试在 Windows 跳过。数据库迁移专项 8 项、任务流专项 52 项通过。
+- 前端：2026-08-30 复核 ESLint 与 TypeScript/Vite 生产构建通过。
+- 浏览器：2026-08-30 复核 9 项确定性 Chromium E2E 全部通过，覆盖登录、会话、成功/失败/中断、HITL 确认、SSE 重连、文件交付和权限矩阵。
+- 在线：当前 `/ready` 返回 PostgreSQL、Redis、Sandbox、Milvus、Embedding 全部 `ok`；提交 `45fadde` 的验收报告记录真实 8090 服务 3 项浏览器冒烟通过。
+- 数据库迁移：已建立幂等 Aerich schema 基线、启动迁移头门禁及自动备份/恢复工具；真实备份、升级、迁移前后临时库恢复、服务重启与浏览器验收均已通过。
 - 构建警告：主 JavaScript 产物约 1.94 MB，仍需后续拆包。
 
 ## 2. 当前 P0
 
 | 顺序 | 工作 | 来源 | 完成定义 |
 | ---: | --- | --- | --- |
-| 1 | 正式数据库迁移与备份恢复 | 历史整改剩余项 | 固化当前 schema；生产关闭自动建表；升级、回滚、恢复流程可重复验证。 |
-| 2 | 沙箱生命周期持久化与幂等释放 | [沙箱生命周期专项](plans/sandbox-container-lifecycle-design.md) | 生命周期、最后活动、租约、重试和错误进入 PostgreSQL；重启/异常后可恢复；不会误回收活跃任务。 |
-| 3 | 统一超时、取消与容器子进程终止 | 历史整改、KunCode 运行时专项 | 顶层 deadline 向下传递；取消后容器内无残留进程；明确区分 timeout/cancelled/process_error。 |
+| 1 | 完成沙箱生命周期集成验收与观察期 | [沙箱生命周期专项](plans/sandbox-container-lifecycle-design.md) | 完成容量上限、空闲回收、后端重启、会话删除和配置版本切换矩阵；只读观察无误后再决定是否开启自动孤儿释放。 |
 
-2026-08-30 已完成原第 4 项“核心浏览器 E2E”；实现和验证证据见[核心浏览器 E2E 验收报告](reports/core-browser-e2e-validation.md)。
+已完成的原 P0：
+
+- “正式数据库迁移与备份恢复”已完成 Aerich 基线接管、迁移前自动备份、迁移头门禁、迁移前后真实恢复演练及发布后完整验收。
+- “统一超时、取消与容器子进程终止”已实现统一 deadline、`execution_id`、进程组终止确认和明确终态，并完成真实 KunCode 中断无残留验收。
+- “核心浏览器 E2E”已完成；实现和验证证据见[核心浏览器 E2E 验收报告](reports/core-browser-e2e-validation.md)。
 
 ## 3. 当前 P1
 
 | 顺序 | 工作 | 来源 | 完成定义 |
 | ---: | --- | --- | --- |
-| 1 | 管理治理：审计、提示词版本/回滚、MCP 连接测试、运行时视图 | [管理后台专项](plans/admin-ui-refactor-plan.md) | 关键配置可追踪、可恢复、可测试；活动沙箱与异常原因可查看。 |
+| 1 | 管理治理：审计、提示词版本/回滚、MCP 连接测试、用户管理、运行时前端视图 | [管理后台专项](plans/admin-ui-refactor-plan.md) | 关键配置可追踪、可恢复、可测试；现有运行时后端接口在后台可查看和安全操作。 |
 | 2 | 前端状态机单元测试 | 对话、计划、终端专项共同缺口 | 覆盖历史投影、`tool_id` 合并、迟到事件、会话切换和重放去重。 |
 | 3 | SSE 真正增量化 | 历史整改剩余项 | 日志片段、阶段、终态分离；重连使用快照；降低带宽和 Redis Stream 体积。 |
 | 4 | 沙箱安全与性能 | [KunCode 运行时专项](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 基于耗时预装高频依赖；非 root；CPU/内存/PID/磁盘/网络边界明确。 |
@@ -47,14 +50,15 @@
 
 | 专项 | 状态 | 估算完成度 | 后续处理 |
 | --- | --- | ---: | --- |
-| [单轮对话聚合与结束态](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 已验证 | 95% | 保留为实施记录；补前端自动化后归档。 |
+| [数据库迁移与备份恢复](plans/database-migration-backup-recovery-plan.md) | 已验证 | 100% | 保留为后续所有模型变更的发布与恢复操作基线。 |
+| [单轮对话聚合与结束态](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 已验证 | 97% | 核心浏览器状态路径已覆盖；保留投影纯函数单元测试尾项。 |
 | [普通用户后台只读访问](plans/read-only-admin-access-plan.md) | 已归档 | 100% | 真实普通用户/管理员浏览器权限矩阵已通过。 |
 | [计划面板实时更新](plans/plan-panel-realtime-update-plan.md) | 已实施，待会话切换 E2E | 92% | 已覆盖计划恢复与 SSE 重连；补多会话切换自动化。 |
 | [数据 Skill / 知识库 E2E](plans/data-skill-knowledge-e2e-plan.md) | 有条件通过 | 90% | 补后台 UI 和 Skill deny 负向用例。 |
-| [KunCode 终端与运行时 UX](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 已实施，待最新 E2E | 88% | 保留 P1 安全/性能尾项。 |
-| [项目缺陷整改指导](plans/project-remediation-guide.md) | 历史基线 | 约80% | 不再直接排期；剩余项已迁入本路线图。 |
-| [管理后台重构](plans/admin-ui-refactor-plan.md) | 进行中 | 约65% | 继续 P1 治理能力。 |
-| [沙箱生命周期](plans/sandbox-container-lifecycle-design.md) | 部分实施 | 约40% | 当前最重要的专项实施计划。 |
+| [KunCode 终端与运行时 UX](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 已实施，主要验收完成 | 93% | 统一取消已验证；保留复杂自动修复视觉验收及非 root/依赖性能尾项。 |
+| [项目缺陷整改指导](plans/project-remediation-guide.md) | 历史基线 | 约90% | 不再直接排期；数据库流程、SSE 增量化和依赖升级等剩余项已迁入本路线图。 |
+| [管理后台重构](plans/admin-ui-refactor-plan.md) | 进行中 | 约72% | MCP 密钥与沙箱运行时后端增强已完成；继续治理页面与审计/版本能力。 |
+| [沙箱生命周期](plans/sandbox-container-lifecycle-design.md) | 已实施，待完整集成验收 | 约90% | 保留为当前 P0 验收专项，不再按“待开发”管理。 |
 
 ## 6. 文档状态规则
 

@@ -274,7 +274,8 @@ Invoke-RestMethod http://127.0.0.1:9997/v1/models
 - 对会话、文件、任务流接口必须验证当前用户所有权；管理接口使用 `get_admin_user`。
 - 不要在异步请求路径中加入阻塞等待。确需调用同步 Milvus/Docker SDK 时使用现有线程边界或 `asyncio.to_thread`。
 - Windows 主进程使用 `AgentService.get_instance()` 共享生命周期资源；非 Windows Celery 任务使用独立实例并负责清理。不要混用，否则会关闭主进程数据库或 Redis 连接。
-- 开发环境允许 `DB_AUTO_CREATE_SCHEMA=true`；生产环境必须通过迁移管理结构，不允许自动建表。
+- 现有或共享数据库必须使用 `DB_AUTO_CREATE_SCHEMA=false`，并通过 `scripts/db_maintenance.py migrate` 在自动备份后执行 Aerich 迁移。`true` 只允许初始化可随时丢弃的开发数据库；生产环境会拒绝启动。
+- 修改任何 Tortoise 模型前先运行 `scripts/db_maintenance.py backup`；生成迁移后通过 `migrate` 升级，并使用 `verify-restore` 在临时数据库验证最新备份。删除列、字段类型变化或数据重写必须把备份恢复作为主恢复方案，不能只依赖 Aerich downgrade。
 
 ### 9.3 React/TypeScript
 

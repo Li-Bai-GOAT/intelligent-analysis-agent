@@ -20,14 +20,14 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
         SET "last_activity_at" = "updated_at"
         WHERE "last_activity_at" IS NULL;
 
-        CREATE INDEX IF NOT EXISTS "idx_sandbox_bindings_status"
+        CREATE INDEX IF NOT EXISTS "idx_sandbox_bin_status_385ba6"
             ON "sandbox_bindings" ("status");
     """
 
 
 async def downgrade(db: BaseDBAsyncClient) -> str:
     return """
-        DROP INDEX IF EXISTS "idx_sandbox_bindings_status";
+        DROP INDEX IF EXISTS "idx_sandbox_bin_status_385ba6";
         ALTER TABLE "sandbox_bindings"
             DROP COLUMN IF EXISTS "config_version",
             DROP COLUMN IF EXISTS "runtime_seen_at",

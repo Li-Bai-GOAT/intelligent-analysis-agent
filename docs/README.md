@@ -16,15 +16,16 @@
 
 | 专项 | 状态 | 优先级 |
 | --- | --- | --- |
-| [沙箱容器回收与生命周期](plans/sandbox-container-lifecycle-design.md) | 部分实施，持久状态和租约待完成 | P0 |
-| [管理后台重构](plans/admin-ui-refactor-plan.md) | 基础页面已完成，治理能力待完成 | P1 |
-| [KunCode 终端与运行时 UX](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 核心协议已实施，安全/性能/自动化待完成 | P1 |
+| [沙箱容器回收与生命周期](plans/sandbox-container-lifecycle-design.md) | 主体已实施，容量/重启/配置切换矩阵与观察期待完成 | P0 验收 |
+| [管理后台重构](plans/admin-ui-refactor-plan.md) | MCP/运行时后端增强已完成，审计、版本、用户和治理页面待完成 | P1 |
+| [KunCode 终端与运行时 UX](plans/kuncode-terminal-runtime-ux-optimization-plan.md) | 结构化终态与统一取消已验证，安全/性能尾项待完成 | P1 |
 
 ## 已实施或有条件通过
 
 | 专项 | 状态 | 剩余验收 |
 | --- | --- | --- |
-| [单轮对话聚合与结束态](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 已验证 | 前端自动化回归 |
+| [数据库迁移与备份恢复](plans/database-migration-backup-recovery-plan.md) | 已验证 | 无；作为后续模型变更发布基线。 |
+| [单轮对话聚合与结束态](plans/conversation-turn-stream-lifecycle-fix-plan.md) | 已验证 | 投影纯函数单元测试尾项 |
 | [普通用户后台只读访问](plans/read-only-admin-access-plan.md) | 已归档 | 无 |
 | [计划面板实时更新](plans/plan-panel-realtime-update-plan.md) | 已实施 | 多会话切换 E2E |
 | [数据 Skill / 知识库 E2E](plans/data-skill-knowledge-e2e-plan.md) | 有条件通过 | 后台 UI、Skill deny 负向用例 |

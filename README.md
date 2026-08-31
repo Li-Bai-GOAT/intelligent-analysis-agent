@@ -169,6 +169,14 @@ cd ..
 Copy-Item .env.example .env
 ```
 
+现有数据库必须保持 `DB_AUTO_CREATE_SCHEMA=false`。首次启动应用或修改模型前，先执行带自动备份的 Aerich 升级：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\db_maintenance.py migrate
+```
+
+备份保存在未纳入 Git 的 `backups/database/`，并附带 SHA-256 与已应用迁移清单。恢复演练和正式恢复方式见[数据库迁移与备份恢复计划](docs/plans/database-migration-backup-recovery-plan.md)。
+
 首次构建隔离沙箱镜像：
 
 ```powershell
