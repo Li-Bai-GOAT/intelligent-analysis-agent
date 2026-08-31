@@ -1,0 +1,6 @@
+runtime-sandbox-*.tar
+simhei.ttf
+__pycache__/
+**/__pycache__/
+*.pyc
+*.log

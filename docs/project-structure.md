@@ -74,7 +74,7 @@ dataagent/
 | `system_prompt.md` | DataPM 默认系统提示词；数据库记录可覆盖默认值。 |
 | `pyproject.toml`、`uv.lock` | Python 依赖与锁定版本。 |
 | `.env.example` | 可提交的环境变量模板。 |
-| `.env`、`sandbox.env` | 仅本地使用的敏感配置，不得提交或输出。 |
+| `.env`、`sandbox.env` | 仅本地使用的敏感配置，不得提交或输出；模板分别为 `.env.example`、`sandbox.env.example`。 |
 | `data_analysis_sandbox.py`、`sandbox_proxy_extension.py` | 自定义沙箱和流式代理扩展。 |
 | `start.sh`、`start_sandbox_server.sh` | 历史 Linux 启动入口；当前 Windows 主线以 `scripts/start.ps1` 为准。 |
 

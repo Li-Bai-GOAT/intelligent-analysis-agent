@@ -147,7 +147,7 @@ FastAPI :8090
 ### 6.2 环境变量
 
 - 本地机密放在 `.env`，模板放在 `.env.example`。
-- `sandbox.env` 是 Sandbox Manager 配置。将它视为敏感配置，不要在输出中打印其值。
+- `sandbox.env` 是 Sandbox Manager 的本地敏感配置，不进入 Git；首次使用从 `sandbox.env.example` 复制，并确保 Bearer Token、Redis 密码与 `.env` 保持一致。不要在输出中打印其值。
 - 不要在代码里硬编码 API Key、JWT Secret、数据库密码或 Sandbox Bearer Token。
 - Windows 启动脚本为主进程设置 `DEBUG=release` 和 `PYTHONUTF8=1`。
 - 当前 Embedding 契约：模型 `qwen3-embedding:0.6b`、维度 `1024`、OpenAI-compatible `/v1/embeddings`。

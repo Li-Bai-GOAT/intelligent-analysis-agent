@@ -6,9 +6,28 @@ dist/
 wheels/
 *.egg-info
 .venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # ==================== 环境变量 (含密钥，不入库) ====================
 .env
+.env.*
+!.env.example
+sandbox.env
+sandbox_server.env
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
 
 # ==================== 日志 ====================
 logs/
@@ -16,7 +35,13 @@ logs/
 
 # ==================== 数据库 dump (体积过大) ====================
 *.sql
-backups/database/
+*.sql.gz
+*.dump
+*.backup
+*.sqlite
+*.sqlite3
+*.db
+backups/
 
 # ==================== 用户上传文件 ====================
 user_uploads/
@@ -50,8 +75,10 @@ Thumbs.db
 nul
 
 # ==================== 本地开发数据 ====================
-milvus/
-sandbox_server.env
+milvus/data/
+milvus/volumes/
+milvus/etcd/
+milvus/minio/
 test_data.csv
 
 # ==================== 工具生成的临时数据 ====================
@@ -61,5 +88,11 @@ test_data.csv
 node_modules/
 frontend/dist/
 frontend/.npm-cache/
+frontend/.vite/
 frontend/playwright-report/
 frontend/test-results/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

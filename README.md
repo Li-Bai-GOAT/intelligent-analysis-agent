@@ -122,7 +122,7 @@ sequenceDiagram
 | 会话工作区 | 上传和生成文件的运行期位置；通过鉴权 API 浏览、预览和下载，不直接暴露宿主机绝对路径。 |
 | Docker 沙箱 | 用户代码、Shell 和 KunCode 的执行边界；不允许让模型生成的命令直接在宿主机运行。 |
 
-Milvus 或 Embedding 不可用时，知识库功能会降级；基础对话不应因此被阻断。`.env`、`sandbox.env` 中的 API Key、Token 和密码不得写入源码、文档、日志或提交记录。
+Milvus 或 Embedding 不可用时，知识库功能会降级；基础对话不应因此被阻断。`.env`、`sandbox.env` 中的 API Key、Token 和密码不得写入源码、文档、日志或提交记录。首次配置沙箱时应复制 `sandbox.env.example` 为 `sandbox.env`，再填入仅限本机使用的值。
 
 ---
 
