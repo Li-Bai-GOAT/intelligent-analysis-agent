@@ -1,10 +1,33 @@
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import css from 'react-syntax-highlighter/dist/esm/languages/prism/css'
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json'
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
+import jsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx'
+import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx'
+import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql'
+import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml'
+import markdown from 'react-syntax-highlighter/dist/esm/languages/prism/markdown'
 import { ChevronRight, User, Bot } from 'lucide-react'
 import type { Message } from '../../types'
+
+// PrismLight 使用精简核心，显式注册所需语言，不依赖其他入口的隐式注册。
+// 避免全量 Prism(~300+ 语言)打入首屏 bundle。注意按依赖顺序注册。
+SyntaxHighlighter.registerLanguage('css', css)
+SyntaxHighlighter.registerLanguage('python', python)
+SyntaxHighlighter.registerLanguage('bash', bash)
+SyntaxHighlighter.registerLanguage('json', json)
+SyntaxHighlighter.registerLanguage('typescript', typescript)
+SyntaxHighlighter.registerLanguage('jsx', jsx)
+SyntaxHighlighter.registerLanguage('tsx', tsx)
+SyntaxHighlighter.registerLanguage('sql', sql)
+SyntaxHighlighter.registerLanguage('yaml', yaml)
+SyntaxHighlighter.registerLanguage('markdown', markdown)
 
 interface MessageBubbleProps {
   message: Message

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { useAuthStore } from './stores/auth'
 import { useUiStore } from './stores/ui'
 import { useSessionStore } from './stores/session'
@@ -7,7 +7,8 @@ import { Header } from './components/layout/Header'
 import { Sidebar } from './components/layout/Sidebar'
 import { ChatArea } from './components/chat/ChatArea'
 import { RightPanel } from './components/layout/RightPanel'
-import { AdminApp } from './admin/AdminApp'
+
+const AdminApp = lazy(() => import('./admin/AdminApp').then((m) => ({ default: m.AdminApp })))
 
 export default function App() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
@@ -25,7 +26,11 @@ export default function App() {
   }
 
   if (page === 'admin') {
-    return <AdminApp />
+    return (
+      <Suspense fallback={<div className="flex h-screen items-center justify-center bg-bg-base text-sm text-text-muted">加载管理后台...</div>}>
+        <AdminApp />
+      </Suspense>
+    )
   }
 
   return (

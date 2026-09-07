@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
-import * as XLSX from 'xlsx'
-import mammoth from 'mammoth'
-import JSZip from 'jszip'
 import { Api } from '../../api/client'
 import { useSessionStore } from '../../stores/session'
 import { Folder, File, FileText, FileCode, FileSpreadsheet, Download, RefreshCw, ChevronRight, ArrowLeft, ExternalLink } from 'lucide-react'
+
+// 预览库体积大,按需动态加载(xlsx / mammoth / jszip 会被打成独立 chunk)
+const loadXlsx = () => import('xlsx')
+const loadMammoth = async () => (await import('mammoth')).default
+const loadJszip = async () => (await import('jszip')).default
 
 interface FileItem {
   name: string
@@ -154,6 +156,7 @@ export function FilesPanel() {
 
       if (ext === 'xlsx' || ext === 'xls') {
         try {
+          const XLSX = await loadXlsx()
           const bytes = await readBinaryFile(fullPath)
           const workbook = XLSX.read(bytes, { type: 'array' })
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
@@ -173,6 +176,7 @@ export function FilesPanel() {
 
       if (isWord) {
         try {
+          const mammoth = await loadMammoth()
           const bytes = await readBinaryFile(fullPath)
           const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer })
           setFileContent({ name, content: result.value || '<p>Word 文件为空</p>', fullPath, isWord: true })
@@ -184,6 +188,7 @@ export function FilesPanel() {
 
       if (isPptx) {
         try {
+          const JSZip = await loadJszip()
           const bytes = await readBinaryFile(fullPath)
           const zip = await JSZip.loadAsync(bytes.buffer)
           const slides: string[] = []
@@ -214,6 +219,7 @@ export function FilesPanel() {
           setFileContent({ name, content: URL.createObjectURL(blob), fullPath, isImage: true })
         } else if (isExcel) {
           try {
+            const XLSX = await loadXlsx()
             const base64 = data.content || ''
             const binary = atob(base64)
             const bytes = new Uint8Array(binary.length)
@@ -233,6 +239,7 @@ export function FilesPanel() {
           }
         } else if (isWord) {
           try {
+            const mammoth = await loadMammoth()
             const base64 = data.content || ''
             const binary = atob(base64)
             const bytes = new Uint8Array(binary.length)
@@ -244,6 +251,7 @@ export function FilesPanel() {
           }
         } else if (isPptx) {
           try {
+            const JSZip = await loadJszip()
             const base64 = data.content || ''
             const binary = atob(base64)
             const bytes = new Uint8Array(binary.length)
@@ -274,6 +282,7 @@ export function FilesPanel() {
         setFileContent({ name, content: data.content ?? '', fullPath, isHtml: true })
       } else if (isExcel) {
         try {
+          const XLSX = await loadXlsx()
           const workbook = XLSX.read(data.content || '', { type: 'string' })
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
           const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as (string | number)[][]

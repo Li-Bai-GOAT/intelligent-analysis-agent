@@ -2,11 +2,13 @@ import type { Page, Route } from '@playwright/test'
 
 export interface MockBackendOptions {
   streamBodies?: string[]
+  streamDelayMs?: number
   pendingPreview?: Record<string, unknown> | null
   files?: Array<{ name: string; path: string; type: 'file' | 'directory'; size?: number }>
 }
 
 export interface MockBackendState {
+  deletedSessionIds: string[]
   confirmations: Array<{ path: string; body: Record<string, unknown> }>
   interruptCalls: number
   lastEventIds: string[]
@@ -25,6 +27,7 @@ function json(route: Route, body: unknown, status = 200) {
 
 export async function installMockBackend(page: Page, options: MockBackendOptions = {}): Promise<MockBackendState> {
   const state: MockBackendState = {
+    deletedSessionIds: [],
     confirmations: [],
     interruptCalls: 0,
     lastEventIds: [],
@@ -61,6 +64,11 @@ export async function installMockBackend(page: Page, options: MockBackendOptions
     if (path === '/sessions/session-e2e' && method === 'GET') {
       return json(route, { messages: [], context_info: { usage_percent: 2, estimated_tokens: 128, max_tokens: 64000 } })
     }
+    if (path === '/sessions/session-e2e' && method === 'DELETE') {
+      state.deletedSessionIds.push('session-e2e')
+      sessions.splice(0, sessions.length)
+      return json(route, { success: true })
+    }
     if (path === '/conversation/session/session-e2e/task' && method === 'GET') {
       return json(route, { session_id: 'session-e2e', has_active_task: false })
     }
@@ -80,6 +88,9 @@ export async function installMockBackend(page: Page, options: MockBackendOptions
     if (path === '/conversation/async' && method === 'POST') return json(route, { task_id: 'task-e2e' })
     if (path === '/conversation/stream/task-e2e' && method === 'GET') {
       state.lastEventIds.push(request.headers()['last-event-id'] || '0')
+      if (options.streamDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.streamDelayMs))
+      }
       const bodies = options.streamBodies || [sse(
         { type: 'text', content: '简单问题回答成功。' },
         { type: 'end' },

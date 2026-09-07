@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test'
+import type { Page } from '@playwright/test'
+import { expect, test } from './support/test'
 
 async function loginAndOpenPrompt(page: Page, username: string, password: string) {
   await page.goto(process.env.E2E_BASE_URL || 'http://127.0.0.1:8090')

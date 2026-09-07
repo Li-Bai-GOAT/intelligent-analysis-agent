@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test'
+import type { Page } from '@playwright/test'
+import { expect, test } from './support/test'
 import { installMockBackend, sse } from './support/mockBackend'
 
 async function login(page: Page, username = 'user') {
@@ -28,6 +29,55 @@ test('登录、创建会话并发送简单问题成功', async ({ page }) => {
   await expect(page.getByText('1 + 1 等于多少？')).toBeVisible()
   await expect(page.getByText('简单问题回答成功。')).toBeVisible()
   await expect(page.getByTitle('发送')).toBeVisible()
+})
+
+test('CSS 代码块保留选择器和属性的语法高亮', async ({ page }) => {
+  await installMockBackend(page, {
+    streamBodies: [sse(
+      { type: 'text', content: '```css\n.example {\n  color: red;\n  padding: 12px;\n}\n```' },
+      { type: 'end' },
+    )],
+  })
+  await login(page)
+  await createSession(page)
+  await send(page, '展示 CSS 示例')
+
+  const code = page.locator('.markdown-body code.language-css')
+  await expect(code).toContainText('.example')
+  for (const token of ['.example', 'color', 'padding']) {
+    const highlighted = code.getByText(token, { exact: true })
+    await expect(highlighted).toBeVisible()
+    await expect(highlighted).toHaveAttribute('style', /color:/)
+  }
+  await expect(page.getByTitle('发送')).toBeVisible()
+})
+
+test('主对话页四处控件保留组件声明的内边距', async ({ page }, testInfo) => {
+  await installMockBackend(page, {
+    streamBodies: [sse(
+      { type: 'thinking', content: '检查控件内边距。' },
+      { type: 'text', content: '间距验证完成。' },
+      { type: 'end' },
+    )],
+  })
+  await login(page)
+  await createSession(page)
+  await send(page, '检查界面间距')
+  await expect(page.getByText('间距验证完成。')).toBeVisible()
+  await page.getByRole('button', { name: '文件', exact: true }).click()
+
+  for (const name of ['计划', '文件', '终端']) {
+    await expect(page.getByRole('button', { name, exact: true })).toHaveCSS('padding', '6px 12px')
+  }
+  for (const title of ['新建对话', '收缩', '下载全部(ZIP)', '刷新']) {
+    await expect(page.getByTitle(title, { exact: true })).toHaveCSS('padding', '4px')
+  }
+  await expect(page.getByRole('button', { name: '思考过程', exact: true })).toHaveCSS('padding', '8px 12px')
+  await expect(page.getByTitle('发送')).toBeVisible()
+  await testInfo.attach('padding-restored-mock', {
+    body: await page.screenshot({ path: testInfo.outputPath('padding-restored.png'), fullPage: true }),
+    contentType: 'image/png',
+  })
 })
 
 test('失败事件进入明确终态', async ({ page }) => {
