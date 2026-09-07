@@ -51,6 +51,7 @@ from data_analysis_sandbox import (
 )
 from app.services.sandbox_injection import SandboxInjectionService
 from app.services.sandbox_lifecycle_service import (
+    RuntimePoolSnapshot,
     SandboxLifecycleService,
     SandboxStatus,
 )
@@ -1168,6 +1169,22 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(lifecycle, "_has_any_active_task", new=AsyncMock(return_value=False)),
+            patch.object(
+                lifecycle,
+                "_runtime_pool_snapshot",
+                new=AsyncMock(
+                    return_value=RuntimePoolSnapshot(frozenset(), 0)
+                ),
+            ),
+            patch.object(
+                lifecycle,
+                "_runtime_registration_exists",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.list_by_statuses",
+                new=AsyncMock(return_value=[]),
+            ),
             patch.object(lifecycle, "_run_docker", side_effect=run_docker),
         ):
             readonly = await lifecycle._reconcile_runtime_orphans(
@@ -1181,6 +1198,168 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(readonly["released"], 0)
         self.assertEqual(confirmed["released"], 1)
         self.assertIn(["rm", "-f", "orphan-id"], commands)
+
+    async def test_orphan_scan_never_counts_or_releases_runtime_pool_member(self):
+        lifecycle = SandboxLifecycleService(orphan_grace_seconds=60)
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace(release=Mock())))
+        old_created = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        labels = json.dumps({"app": "dataagent", "sandbox_type": "data_analysis"})
+        container_id = "pool-container-id"
+        container_name = "data-sandbox-pool"
+        pool_snapshot = RuntimePoolSnapshot(
+            frozenset({container_id, container_name, f"/{container_name}"}),
+            1,
+        )
+        commands = []
+
+        def run_docker(arguments):
+            commands.append(arguments)
+            if arguments[0] == "ps":
+                return f"{container_id}\n"
+            if arguments[0] == "inspect":
+                return (
+                    f"{container_id}|/{container_name}|{old_created}|{labels}\n"
+                )
+            self.fail(f"Unexpected Docker arguments: {arguments}")
+
+        with (
+            patch.object(lifecycle, "_has_any_active_task", new=AsyncMock(return_value=False)),
+            patch.object(
+                lifecycle,
+                "_runtime_pool_snapshot",
+                new=AsyncMock(return_value=pool_snapshot),
+            ),
+            patch.object(lifecycle, "_run_docker", side_effect=run_docker),
+        ):
+            result = await lifecycle._reconcile_runtime_orphans(
+                [], read_only=False, allow_release=True
+            )
+
+        self.assertEqual(result["candidates"], 0)
+        self.assertEqual(result["released"], 0)
+        self.assertEqual(result["pool_members"], 1)
+        self.assertNotIn(["rm", "-f", container_id], commands)
+
+    async def test_orphan_scan_fails_closed_when_pool_snapshot_is_unavailable(self):
+        lifecycle = SandboxLifecycleService(orphan_grace_seconds=60)
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace(release=Mock())))
+        run_docker = Mock()
+
+        with (
+            patch.object(lifecycle, "_has_any_active_task", new=AsyncMock(return_value=False)),
+            patch.object(
+                lifecycle,
+                "_runtime_pool_snapshot",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(lifecycle, "_run_docker", run_docker),
+        ):
+            result = await lifecycle._reconcile_runtime_orphans(
+                [], read_only=False, allow_release=True
+            )
+
+        self.assertEqual(result["candidates"], 0)
+        self.assertEqual(result["released"], 0)
+        run_docker.assert_not_called()
+
+    async def test_orphan_release_rechecks_pool_before_docker_fallback(self):
+        lifecycle = SandboxLifecycleService(orphan_grace_seconds=60)
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace(release=Mock())))
+        old_created = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        labels = json.dumps({"app": "dataagent", "sandbox_type": "data_analysis"})
+        container_id = "racing-container-id"
+        container_name = "data-sandbox-racing"
+        empty_pool = RuntimePoolSnapshot(frozenset(), 0)
+        entered_pool = RuntimePoolSnapshot(
+            frozenset({container_id, container_name, f"/{container_name}"}),
+            1,
+        )
+        commands = []
+
+        def run_docker(arguments):
+            commands.append(arguments)
+            if arguments[0] == "ps":
+                return f"{container_id}\n"
+            if arguments[0] == "inspect":
+                return (
+                    f"{container_id}|/{container_name}|{old_created}|{labels}\n"
+                )
+            if arguments[0] == "rm":
+                return container_id
+            self.fail(f"Unexpected Docker arguments: {arguments}")
+
+        with (
+            patch.object(lifecycle, "_has_any_active_task", new=AsyncMock(return_value=False)),
+            patch.object(
+                lifecycle,
+                "_runtime_pool_snapshot",
+                new=AsyncMock(side_effect=[empty_pool, empty_pool, entered_pool]),
+            ),
+            patch.object(
+                lifecycle,
+                "_runtime_registration_exists",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.list_by_statuses",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(lifecycle, "_run_docker", side_effect=run_docker),
+        ):
+            result = await lifecycle._reconcile_runtime_orphans(
+                [], read_only=False, allow_release=True
+            )
+
+        self.assertEqual(result["candidates"], 1)
+        self.assertEqual(result["released"], 0)
+        self.assertNotIn(["rm", "-f", container_id], commands)
+
+    async def test_orphan_release_requires_definitive_runtime_registration_state(self):
+        lifecycle = SandboxLifecycleService(orphan_grace_seconds=60)
+        lifecycle.configure(SimpleNamespace(manager_api=SimpleNamespace(release=Mock())))
+        old_created = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        labels = json.dumps({"app": "dataagent", "sandbox_type": "data_analysis"})
+        container_id = "unknown-registration-id"
+        container_name = "data-sandbox-unknown"
+        commands = []
+
+        def run_docker(arguments):
+            commands.append(arguments)
+            if arguments[0] == "ps":
+                return f"{container_id}\n"
+            if arguments[0] == "inspect":
+                return (
+                    f"{container_id}|/{container_name}|{old_created}|{labels}\n"
+                )
+            self.fail(f"Unexpected Docker arguments: {arguments}")
+
+        with (
+            patch.object(lifecycle, "_has_any_active_task", new=AsyncMock(return_value=False)),
+            patch.object(
+                lifecycle,
+                "_runtime_pool_snapshot",
+                new=AsyncMock(
+                    return_value=RuntimePoolSnapshot(frozenset(), 0)
+                ),
+            ),
+            patch.object(
+                lifecycle,
+                "_runtime_registration_exists",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.repositories.file_repo.SandboxBindingRepository.list_by_statuses",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(lifecycle, "_run_docker", side_effect=run_docker),
+        ):
+            result = await lifecycle._reconcile_runtime_orphans(
+                [], read_only=False, allow_release=True
+            )
+
+        self.assertEqual(result["candidates"], 1)
+        self.assertEqual(result["released"], 0)
+        self.assertNotIn(["rm", "-f", container_id], commands)
 
     async def test_session_owner_rejects_unknown_session(self):
         with patch.object(SessionRepository, "get", new=AsyncMock(return_value=None)):

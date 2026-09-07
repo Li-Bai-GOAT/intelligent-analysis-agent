@@ -20,6 +20,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any, AsyncIterator, Optional
+from urllib.parse import urlsplit, urlunsplit
+
+import redis.asyncio as aioredis
 
 from app.config import settings
 from app.models.file import SandboxBinding
@@ -67,6 +70,14 @@ class SandboxAcquireResult:
     config_mismatch: bool
     previous_sandbox_id: Optional[str]
     previous_mount_dir: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePoolSnapshot:
+    """Identity set for the Runtime manager's current prewarmed pool."""
+
+    identities: frozenset[str]
+    member_count: int
 
 
 _SECRET_VALUE = re.compile(
@@ -118,6 +129,10 @@ class SandboxLifecycleService:
         max_release_attempts: int | None = None,
         orphan_grace_seconds: int | None = None,
         auto_release_orphans: bool | None = None,
+        manager_redis_url: str | None = None,
+        manager_redis_db: int | None = None,
+        manager_pool_key: str | None = None,
+        manager_pool_size: int | None = None,
         config_version: str | None = None,
     ) -> None:
         self.idle_timeout = timedelta(
@@ -143,9 +158,30 @@ class SandboxLifecycleService:
             if auto_release_orphans is None
             else auto_release_orphans
         )
+        self.manager_redis_url = (
+            settings.SANDBOX_MANAGER_REDIS_URL
+            if manager_redis_url is None
+            else manager_redis_url
+        )
+        self.manager_redis_db = (
+            settings.SANDBOX_MANAGER_REDIS_DB
+            if manager_redis_db is None
+            else manager_redis_db
+        )
+        self.manager_pool_key = (
+            settings.SANDBOX_MANAGER_POOL_KEY
+            if manager_pool_key is None
+            else manager_pool_key
+        )
+        self.manager_pool_size = (
+            settings.SANDBOX_MANAGER_POOL_SIZE
+            if manager_pool_size is None
+            else manager_pool_size
+        )
         self.config_version = config_version or settings.SANDBOX_CONFIG_VERSION
         self.sandbox_service: Any = None
         self.redis: Any = None
+        self._manager_pool_redis: Any = None
         self._task: Optional[asyncio.Task[None]] = None
         self._running = False
         self._local_locks: dict[str, asyncio.Lock] = {}
@@ -179,6 +215,16 @@ class SandboxLifecycleService:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._manager_pool_redis is not None:
+            try:
+                await self._manager_pool_redis.aclose()
+            except Exception as error:
+                logger.warning(
+                    "Failed to close Runtime pool Redis client: %s",
+                    _safe_error(error),
+                )
+            finally:
+                self._manager_pool_redis = None
 
     async def _reconcile_loop(self) -> None:
         while self._running:
@@ -503,6 +549,8 @@ class SandboxLifecycleService:
             "failed": 0,
             "orphan_candidates": 0,
             "orphan_released": 0,
+            "orphan_pool_members": 0,
+            "orphan_pool_excess": 0,
         }
         if self.sandbox_service is None:
             logger.warning("Sandbox lifecycle reconciliation skipped: Runtime is unavailable")
@@ -582,6 +630,8 @@ class SandboxLifecycleService:
         )
         summary["orphan_candidates"] = orphan_summary["candidates"]
         summary["orphan_released"] = orphan_summary["released"]
+        summary["orphan_pool_members"] = orphan_summary.get("pool_members", 0)
+        summary["orphan_pool_excess"] = orphan_summary.get("pool_excess", 0)
         return summary
 
     def _release_retry_due(self, binding: SandboxBinding, now: datetime) -> bool:
@@ -668,9 +718,30 @@ class SandboxLifecycleService:
         read_only: bool,
         allow_release: bool,
     ) -> dict[str, int]:
-        result = {"candidates": 0, "released": 0}
+        result = {
+            "candidates": 0,
+            "released": 0,
+            "pool_members": 0,
+            "pool_excess": 0,
+        }
         if await self._has_any_active_task():
             return result
+
+        pool_snapshot = await self._runtime_pool_snapshot()
+        if pool_snapshot is None:
+            logger.warning(
+                "Sandbox orphan scan skipped: Runtime pool state is unverifiable"
+            )
+            return result
+        result["pool_members"] = pool_snapshot.member_count
+        result["pool_excess"] = max(
+            0, pool_snapshot.member_count - self.manager_pool_size
+        )
+        if result["pool_excess"]:
+            logger.warning(
+                "Runtime pool contains %s excess container(s); they remain protected",
+                result["pool_excess"],
+            )
         try:
             output = await asyncio.to_thread(
                 self._run_docker,
@@ -687,12 +758,12 @@ class SandboxLifecycleService:
             logger.warning("Sandbox orphan scan skipped: %s", _safe_error(error))
             return result
 
-        known_container_ids: set[str] = set()
-        known_sandbox_ids = {binding.sandbox_id for binding in bindings}
-        for binding in bindings:
-            info = await self._runtime_info(binding.sandbox_id)
-            if isinstance(info, dict) and info.get("container_id"):
-                known_container_ids.add(str(info["container_id"]))
+        known_identities = await self._binding_runtime_identities(bindings)
+        if known_identities is None:
+            logger.warning(
+                "Sandbox orphan scan skipped: binding Runtime state is unverifiable"
+            )
+            return result
 
         cutoff = _utcnow() - self.orphan_grace
         for container_id in {line.strip() for line in output.splitlines() if line.strip()}:
@@ -700,11 +771,10 @@ class SandboxLifecycleService:
             if metadata is None:
                 continue
             raw_id, name, created_at, labels = metadata
+            identities = self._container_identities(raw_id, name)
             if (
-                raw_id in known_container_ids
-                or raw_id in known_sandbox_ids
-                or name in known_sandbox_ids
-                or name.removeprefix("/") in known_sandbox_ids
+                identities & known_identities
+                or identities & pool_snapshot.identities
                 or created_at >= cutoff
                 or labels.get("app") != "dataagent"
                 or labels.get("sandbox_type") != "data_analysis"
@@ -724,28 +794,208 @@ class SandboxLifecycleService:
         return result
 
     async def _release_unbound_container(self, container_id: str, name: str) -> bool:
-        """Release a fully labelled, grace-perioded candidate after Runtime first."""
-        try:
-            await asyncio.to_thread(
-                self.sandbox_service.manager_api.release,
-                name.removeprefix("/"),
+        """Release a candidate only after every authoritative state is rechecked."""
+        if not await self._orphan_release_preflight(container_id, name):
+            return False
+
+        runtime_identity = name.removeprefix("/")
+        registration = await self._runtime_registration_exists(runtime_identity)
+        if registration is None:
+            logger.warning(
+                "Refusing orphan release for %s: Runtime registration is unknown",
+                container_id,
             )
-        except Exception:
-            # A lost Runtime mapping cannot release this named Docker resource;
-            # fall through to a label-verified Docker removal below.
-            pass
-        try:
-            remaining = await asyncio.to_thread(
-                self._run_docker,
-                ["ps", "-aq", "--filter", f"id={container_id}"],
-            )
+            return False
+
+        if registration is True:
+            try:
+                await asyncio.to_thread(
+                    self.sandbox_service.manager_api.release,
+                    runtime_identity,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Runtime refused orphan release for %s: %s",
+                    container_id,
+                    _safe_error(error),
+                )
+                return False
+            try:
+                remaining = await asyncio.to_thread(
+                    self._run_docker,
+                    ["ps", "-aq", "--filter", f"id={container_id}"],
+                )
+            except Exception as error:
+                logger.warning(
+                    "Cannot confirm Runtime orphan release for %s: %s",
+                    container_id,
+                    _safe_error(error),
+                )
+                return False
             if not remaining.strip():
                 return True
+            logger.warning(
+                "Runtime reported release but container %s still exists; "
+                "Docker fallback is disabled for registered containers",
+                container_id,
+            )
+            return False
+
+        # Runtime explicitly confirmed that it has no registration.  Recheck
+        # every protection once more immediately before the Docker fallback.
+        if not await self._orphan_release_preflight(container_id, name):
+            return False
+        try:
             await asyncio.to_thread(self._run_docker, ["rm", "-f", container_id])
             return True
         except Exception as error:
-            logger.warning("Failed to release labelled orphan %s: %s", container_id, _safe_error(error))
+            logger.warning(
+                "Failed to release labelled orphan %s: %s",
+                container_id,
+                _safe_error(error),
+            )
             return False
+
+    async def _orphan_release_preflight(self, container_id: str, name: str) -> bool:
+        """Fail closed unless the candidate is still old, unbound and unpooled."""
+        if await self._has_any_active_task():
+            logger.warning(
+                "Refusing orphan release for %s: task activity is present or unknown",
+                container_id,
+            )
+            return False
+
+        try:
+            bindings = await SandboxBindingRepository.list_by_statuses(
+                [
+                    SandboxStatus.ACTIVE,
+                    SandboxStatus.IDLE,
+                    SandboxStatus.RELEASING,
+                    SandboxStatus.FAILED,
+                    SandboxStatus.ORPHANED,
+                ]
+            )
+        except Exception as error:
+            logger.warning(
+                "Refusing orphan release for %s: binding lookup failed: %s",
+                container_id,
+                _safe_error(error),
+            )
+            return False
+
+        known_identities = await self._binding_runtime_identities(bindings)
+        if known_identities is None:
+            return False
+
+        pool_snapshot = await self._runtime_pool_snapshot()
+        if pool_snapshot is None:
+            return False
+
+        metadata = await self._docker_metadata(container_id)
+        if metadata is None:
+            return False
+        raw_id, current_name, created_at, labels = metadata
+        identities = self._container_identities(raw_id, current_name)
+        expected_name = name.removeprefix("/")
+        if (
+            raw_id != container_id
+            or current_name.removeprefix("/") != expected_name
+            or created_at >= _utcnow() - self.orphan_grace
+            or labels.get("app") != "dataagent"
+            or labels.get("sandbox_type") != "data_analysis"
+            or identities & known_identities
+            or identities & pool_snapshot.identities
+        ):
+            logger.warning(
+                "Refusing orphan release for %s: candidate protection changed",
+                container_id,
+            )
+            return False
+        return True
+
+    async def _binding_runtime_identities(
+        self, bindings: list[SandboxBinding]
+    ) -> Optional[set[str]]:
+        identities: set[str] = set()
+        for binding in bindings:
+            sandbox_id = str(binding.sandbox_id)
+            identities.update(self._container_identities(sandbox_id, sandbox_id))
+            info = await self._runtime_info(sandbox_id)
+            if info is None:
+                return None
+            if info is False:
+                continue
+            container_id = info.get("container_id")
+            container_name = info.get("container_name") or info.get("name")
+            if container_id:
+                identities.add(str(container_id))
+            if container_name:
+                identities.update(
+                    self._container_identities(str(container_id or ""), str(container_name))
+                )
+        return identities
+
+    async def _runtime_pool_snapshot(self) -> Optional[RuntimePoolSnapshot]:
+        """Read the manager's authoritative pool queue without changing Redis DB."""
+        try:
+            if self._manager_pool_redis is None:
+                self._manager_pool_redis = aioredis.from_url(
+                    self._manager_pool_connection_url(),
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                    socket_timeout=2,
+                )
+            raw_members = await self._manager_pool_redis.lrange(
+                self.manager_pool_key, 0, -1
+            )
+            identities: set[str] = set()
+            for raw_member in raw_members:
+                if isinstance(raw_member, bytes):
+                    raw_member = raw_member.decode("utf-8")
+                member = json.loads(raw_member)
+                if not isinstance(member, dict):
+                    raise ValueError("Runtime pool entry is not an object")
+                container_id = str(member.get("container_id") or "").strip()
+                container_name = str(member.get("container_name") or "").strip()
+                session_id = str(member.get("session_id") or "").strip()
+                if not container_id or not container_name:
+                    raise ValueError("Runtime pool entry has no container identity")
+                identities.update(
+                    self._container_identities(container_id, container_name)
+                )
+                if session_id:
+                    identities.add(session_id)
+            return RuntimePoolSnapshot(
+                identities=frozenset(identities),
+                member_count=len(raw_members),
+            )
+        except Exception as error:
+            logger.warning(
+                "Runtime pool snapshot is unavailable: %s",
+                _safe_error(error),
+            )
+            return None
+
+    def _manager_pool_connection_url(self) -> str:
+        configured = self.manager_redis_url.strip()
+        base_url = configured or settings.REDIS_URL
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"redis", "rediss"} or not parsed.netloc:
+            raise ValueError("Runtime manager Redis URL is invalid")
+        return urlunsplit(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                f"/{self.manager_redis_db}",
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+
+    @staticmethod
+    def _container_identities(container_id: str, name: str) -> set[str]:
+        normalized_name = name.removeprefix("/")
+        return {identity for identity in {container_id, name, normalized_name} if identity}
 
     async def _docker_metadata(
         self, container_id: str

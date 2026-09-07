@@ -136,6 +136,15 @@ class Settings(BaseSettings):
     # Default to observation-only for containers that have no database fact.
     # Idle bindings and explicit releases are still released automatically.
     SANDBOX_AUTO_RELEASE_ORPHANS: bool = False
+    # The Runtime manager keeps its prewarmed container pool in Redis.  Use a
+    # dedicated client for this database so lifecycle checks never issue
+    # SELECT against the application's shared Redis connection.
+    SANDBOX_MANAGER_REDIS_URL: str = ""
+    SANDBOX_MANAGER_REDIS_DB: int = 5
+    SANDBOX_MANAGER_POOL_KEY: str = (
+        "_runtime_sandbox_container_container_pool:data_analysis"
+    )
+    SANDBOX_MANAGER_POOL_SIZE: int = 2
     SANDBOX_CONFIG_VERSION: str = "deepseek-v1"
     # Comma-separated host environment names that MCP configuration is allowed
     # to reference with {{secret:NAME}}.  An empty list fails closed.
