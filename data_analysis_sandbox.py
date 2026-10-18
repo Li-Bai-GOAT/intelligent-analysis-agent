@@ -25,7 +25,42 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional, List, Generator, AsyncGenerator
+from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
+
+
+def _emit_model_audit_event(event: str, **fields: Any) -> None:
+    """Emit host-side audit events when this adapter runs inside DataAgent.
+
+    The same extension file is also copied into the sandbox image, where the
+    host application package is intentionally unavailable.
+    """
+    try:
+        from app.observability.model_audit import emit_event
+    except (ImportError, ModuleNotFoundError):
+        return
+    emit_event(event, **fields)
+
+
+def _audit_completion_fields(started_monotonic: float) -> dict[str, Any]:
+    return {
+        "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "latency_ms": round((time.monotonic() - started_monotonic) * 1000),
+    }
+
+
+def _kuncode_model_allowed(model: str | None) -> bool:
+    requested = (model or os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.6-pro")).strip()
+    allowed = {
+        item.strip()
+        for item in os.getenv("ALLOWED_KUNCODE_MODELS", "mimo/mimo-v2.6-pro").split(",")
+        if item.strip()
+    }
+    if requested not in allowed:
+        return False
+    if requested.lower().startswith("mimo/") and os.getenv("DISABLE_MIMO", "false").lower() in {"1", "true", "yes", "on"}:
+        return False
+    return True
 
 
 KUNCODE_RUNTIME_CONTEXT = """[DataAgent execution environment]
@@ -129,6 +164,48 @@ from agentscope_runtime.sandbox.utils import build_image_uri  # noqa: E402
 from agentscope_runtime.sandbox.registry import SandboxRegistry  # noqa: E402
 from agentscope_runtime.sandbox.enums import SandboxType  # noqa: E402
 from agentscope_runtime.sandbox.box.sandbox import Sandbox, SandboxAsync  # noqa: E402
+
+
+def _build_kuncode_runtime_environment() -> dict[str, str]:
+    """Build one host-side environment map for both sandbox registrations."""
+    model = os.getenv("KUNCODE_MODEL", "").strip()
+    if not model:
+        provider = os.getenv("MODEL_PROVIDER", "mimo").strip().lower()
+        model_name = os.getenv(
+            {
+                "mimo": "MIMO_MODEL_NAME",
+                "deepseek": "DEEPSEEK_MODEL_NAME",
+                "openai": "OPENAI_MODEL_NAME",
+            }.get(provider, "MIMO_MODEL_NAME"),
+            "mimo-v2.6-pro",
+        ).strip()
+        model = f"{provider}/{model_name}" if provider and model_name else "mimo/mimo-v2.6-pro"
+
+    allowed_models = os.getenv("ALLOWED_KUNCODE_MODELS", "").strip() or model
+    return {
+        "KUNCODE_MODEL": model,
+        "ALLOWED_KUNCODE_MODELS": allowed_models,
+        "DISABLE_MIMO": os.getenv("DISABLE_MIMO", "false"),
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
+        "DEEPSEEK_API_KEY": os.getenv("DEEPSEEK_API_KEY", ""),
+        "DEEPSEEK_BASE_URL": os.getenv("DEEPSEEK_BASE_URL", ""),
+        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
+        "ANTHROPIC_BASE_URL": os.getenv("ANTHROPIC_BASE_URL", ""),
+        "mmchat_ANTHROPIC_API_KEY": os.getenv("mmchat_ANTHROPIC_API_KEY", ""),
+        "mmchat_ANTHROPIC_BASE_URL": os.getenv("mmchat_ANTHROPIC_BASE_URL", ""),
+        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
+        "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", ""),
+        "MIMO_API_KEY": os.getenv("MIMO_API_KEY", ""),
+        "MIMO_BASE_URL": os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1"),
+        "SILICONFLOW_API_KEY": os.getenv("SILICONFLOW_API_KEY", ""),
+    }
+
+
+KUNCODE_RUNTIME_ENVIRONMENT = _build_kuncode_runtime_environment()
 
 # ==================== Streaming Client ====================
 
@@ -393,6 +470,17 @@ class _KunCodeExecutionControl:
         self._dataagent_execution_id = execution_id
         self._dataagent_deadline_at_ms = deadline_at_ms
 
+    def configure_audit_context(
+        self,
+        *,
+        trace_id: str | None = None,
+        task_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        self._dataagent_trace_id = trace_id
+        self._dataagent_task_id = task_id
+        self._dataagent_session_id = session_id
+
     def _execution_context(self) -> tuple[str, int | None, float]:
         execution_id = getattr(self, "_dataagent_execution_id", None) or uuid.uuid4().hex
         deadline_at_ms = getattr(self, "_dataagent_deadline_at_ms", None)
@@ -453,33 +541,7 @@ class _KunCodeExecutionControl:
     security_level="medium",
     timeout=7200,
     description="Data Analysis Sandbox with KunCode AI (pandas, numpy, matplotlib, seaborn, scikit-learn)",
-    environment={
-        # KunCode 模型配置
-        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "deepseek/deepseek-v4-flash"),
-        "PYTHONUTF8": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        # MiniMax
-        "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
-        # DeepSeek
-        "DEEPSEEK_API_KEY": os.getenv("DEEPSEEK_API_KEY", ""),
-        "DEEPSEEK_BASE_URL": os.getenv("DEEPSEEK_BASE_URL", ""),
-        # Anthropic
-        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-        "ANTHROPIC_BASE_URL": os.getenv("ANTHROPIC_BASE_URL", ""),
-        # 自定义 MMChat Claude
-        "mmchat_ANTHROPIC_API_KEY": os.getenv("mmchat_ANTHROPIC_API_KEY", ""),
-        "mmchat_ANTHROPIC_BASE_URL": os.getenv("mmchat_ANTHROPIC_BASE_URL", ""),
-        # OpenAI
-        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
-        "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", ""),
-        # Mimo (OpenAI-compatible)
-        "MIMO_API_KEY": os.getenv("MIMO_API_KEY", ""),
-        "MIMO_BASE_URL": os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1"),
-        # 硅基流动
-        "SILICONFLOW_API_KEY": os.getenv("SILICONFLOW_API_KEY", "")
-    },
+    environment=dict(KUNCODE_RUNTIME_ENVIRONMENT),
     runtime_config={
         # Session sandboxes are runtime-managed resources, not persistent
         # infrastructure. A Docker daemon restart must not revive an orphan.
@@ -490,7 +552,7 @@ class _KunCodeExecutionControl:
         "labels": {
             "app": "dataagent",
             "sandbox_type": "data_analysis",
-            "config_version": os.getenv("SANDBOX_CONFIG_VERSION", "deepseek-v1"),
+            "config_version": os.getenv("SANDBOX_CONFIG_VERSION", "mimo-v2.6"),
         },
     },
 )
@@ -617,6 +679,22 @@ class DataAnalysisSandbox(_KunCodeExecutionControl, Sandbox):
 
         """
         from agentscope.tool import ToolResponse
+        requested_model = model or os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.6-pro")
+        if not _kuncode_model_allowed(model):
+            _emit_model_audit_event(
+                "kuncode_failed",
+                request_id=f"kuncode_rejected_{uuid.uuid4().hex}",
+                trace_id=getattr(self, "_dataagent_trace_id", None),
+                parent_task_id=getattr(self, "_dataagent_task_id", None),
+                session_id=getattr(self, "_dataagent_session_id", None),
+                source="sandbox",
+                entrypoint="run_kuncode",
+                sandbox_id=self.sandbox_id,
+                requested_model=requested_model,
+                result="failed",
+                error_type="ModelAdmissionError",
+            )
+            raise ValueError(f"KunCode 模型未获准: {requested_model}")
         # 构建请求参数
         request_data = {
             "prompt": _build_kuncode_runtime_prompt(prompt),
@@ -631,11 +709,31 @@ class DataAnalysisSandbox(_KunCodeExecutionControl, Sandbox):
         request_data.update({
             "execution_id": execution_id,
             "deadline_at_ms": deadline_at_ms,
+            "trace_id": getattr(self, "_dataagent_trace_id", None),
+            "task_id": getattr(self, "_dataagent_task_id", None),
+            "dataagent_session_id": getattr(self, "_dataagent_session_id", None),
+            "dataagent_sandbox_id": self.sandbox_id,
         })
         url = self._get_sse_url()
         headers = self._get_auth_headers()
         accumulated_output = ""
         terminal_outcome: dict[str, Any] | None = None
+        started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        started_monotonic = time.monotonic()
+        _emit_model_audit_event(
+            "kuncode_started",
+            request_id=f"kuncode_{execution_id}",
+            trace_id=getattr(self, "_dataagent_trace_id", None),
+            parent_task_id=getattr(self, "_dataagent_task_id", None),
+            session_id=getattr(self, "_dataagent_session_id", None),
+            source="sandbox",
+            entrypoint="run_kuncode",
+            sandbox_id=self.sandbox_id,
+            requested_model=requested_model,
+            actual_model=requested_model,
+            execution_id=execution_id,
+            started_at=started_at,
+        )
         try:
             # 使用异步 SSE 流，不阻塞事件循环
             async for event in StreamingClient.stream_sse_async(
@@ -663,6 +761,19 @@ class DataAnalysisSandbox(_KunCodeExecutionControl, Sandbox):
                     is_last=False,
                 )
         except asyncio.CancelledError:
+            _emit_model_audit_event(
+                "kuncode_cancelled",
+                request_id=f"kuncode_{execution_id}",
+                trace_id=getattr(self, "_dataagent_trace_id", None),
+                parent_task_id=getattr(self, "_dataagent_task_id", None),
+                session_id=getattr(self, "_dataagent_session_id", None),
+                execution_id=execution_id,
+                source="sandbox",
+                sandbox_id=self.sandbox_id,
+                requested_model=requested_model,
+                result="cancelled",
+                **_audit_completion_fields(started_monotonic),
+            )
             logger.info("KunCode SSE streaming cancelled by user")
             cancel_reason = (
                 "timeout"
@@ -692,6 +803,21 @@ class DataAnalysisSandbox(_KunCodeExecutionControl, Sandbox):
         terminal_outcome = _finalize_kuncode_outcome(
             accumulated_output,
             terminal_outcome,
+        )
+        _emit_model_audit_event(
+            "kuncode_finished" if terminal_outcome["success"] else "kuncode_failed",
+            request_id=f"kuncode_{execution_id}",
+            execution_id=execution_id,
+            trace_id=getattr(self, "_dataagent_trace_id", None),
+            parent_task_id=getattr(self, "_dataagent_task_id", None),
+            session_id=getattr(self, "_dataagent_session_id", None),
+            source="sandbox",
+            entrypoint="run_kuncode",
+            sandbox_id=self.sandbox_id,
+            actual_model=requested_model,
+            result="success" if terminal_outcome["success"] else "failed",
+            error_type=terminal_outcome.get("error_code"),
+            **_audit_completion_fields(started_monotonic),
         )
         if not terminal_outcome["success"]:
             accumulated_output = _append_kuncode_failure_hint(accumulated_output)
@@ -740,39 +866,13 @@ class DataAnalysisSandbox(_KunCodeExecutionControl, Sandbox):
     security_level="medium",
     timeout=7200,
     description="Data Analysis Sandbox with KunCode AI (Async)",
-    environment={
-        # KunCode 模型配置
-        "KUNCODE_MODEL": os.getenv("KUNCODE_MODEL", "deepseek/deepseek-v4-flash"),
-        "PYTHONUTF8": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        # MiniMax
-        "MINIMAX_API_KEY": os.getenv("MINIMAX_API_KEY", ""),
-        # DeepSeek
-        "DEEPSEEK_API_KEY": os.getenv("DEEPSEEK_API_KEY", ""),
-        "DEEPSEEK_BASE_URL": os.getenv("DEEPSEEK_BASE_URL", ""),
-        # Anthropic
-        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-        "ANTHROPIC_BASE_URL": os.getenv("ANTHROPIC_BASE_URL", ""),
-        # 自定义 MMChat Claude
-        "mmchat_ANTHROPIC_API_KEY": os.getenv("mmchat_ANTHROPIC_API_KEY", ""),
-        "mmchat_ANTHROPIC_BASE_URL": os.getenv("mmchat_ANTHROPIC_BASE_URL", ""),
-        # OpenAI
-        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
-        "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", ""),
-        # Mimo (OpenAI-compatible)
-        "MIMO_API_KEY": os.getenv("MIMO_API_KEY", ""),
-        "MIMO_BASE_URL": os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1"),
-        # 硅基流动
-        "SILICONFLOW_API_KEY": os.getenv("SILICONFLOW_API_KEY", "")
-    },
+    environment=dict(KUNCODE_RUNTIME_ENVIRONMENT),
     runtime_config={
         "restart_policy": {"Name": "no"},
         "labels": {
             "app": "dataagent",
             "sandbox_type": "data_analysis",
-            "config_version": os.getenv("SANDBOX_CONFIG_VERSION", "deepseek-v1"),
+            "config_version": os.getenv("SANDBOX_CONFIG_VERSION", "mimo-v2.6"),
         },
     },
 )
@@ -897,6 +997,22 @@ class DataAnalysisSandboxAsync(_KunCodeExecutionControl, SandboxAsync):
 
         """
         from agentscope.tool import ToolResponse
+        requested_model = model or os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.6-pro")
+        if not _kuncode_model_allowed(model):
+            _emit_model_audit_event(
+                "kuncode_failed",
+                request_id=f"kuncode_rejected_{uuid.uuid4().hex}",
+                trace_id=getattr(self, "_dataagent_trace_id", None),
+                parent_task_id=getattr(self, "_dataagent_task_id", None),
+                session_id=getattr(self, "_dataagent_session_id", None),
+                source="sandbox",
+                entrypoint="run_kuncode",
+                sandbox_id=self.sandbox_id,
+                requested_model=requested_model,
+                result="failed",
+                error_type="ModelAdmissionError",
+            )
+            raise ValueError(f"KunCode 模型未获准: {requested_model}")
         # 构建请求参数
         request_data = {
             "prompt": _build_kuncode_runtime_prompt(prompt),
@@ -911,11 +1027,31 @@ class DataAnalysisSandboxAsync(_KunCodeExecutionControl, SandboxAsync):
         request_data.update({
             "execution_id": execution_id,
             "deadline_at_ms": deadline_at_ms,
+            "trace_id": getattr(self, "_dataagent_trace_id", None),
+            "task_id": getattr(self, "_dataagent_task_id", None),
+            "dataagent_session_id": getattr(self, "_dataagent_session_id", None),
+            "dataagent_sandbox_id": self.sandbox_id,
         })
         url = self._get_sse_url()
         headers = self._get_auth_headers()
         accumulated_output = ""
         terminal_outcome: dict[str, Any] | None = None
+        started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        started_monotonic = time.monotonic()
+        _emit_model_audit_event(
+            "kuncode_started",
+            request_id=f"kuncode_{execution_id}",
+            trace_id=getattr(self, "_dataagent_trace_id", None),
+            parent_task_id=getattr(self, "_dataagent_task_id", None),
+            session_id=getattr(self, "_dataagent_session_id", None),
+            source="sandbox",
+            entrypoint="run_kuncode",
+            sandbox_id=self.sandbox_id,
+            requested_model=requested_model,
+            actual_model=requested_model,
+            execution_id=execution_id,
+            started_at=started_at,
+        )
         try:
             async for event in StreamingClient.stream_sse_async(
                 url,
@@ -942,6 +1078,19 @@ class DataAnalysisSandboxAsync(_KunCodeExecutionControl, SandboxAsync):
                     is_last=False,
                 )
         except asyncio.CancelledError:
+            _emit_model_audit_event(
+                "kuncode_cancelled",
+                request_id=f"kuncode_{execution_id}",
+                trace_id=getattr(self, "_dataagent_trace_id", None),
+                parent_task_id=getattr(self, "_dataagent_task_id", None),
+                session_id=getattr(self, "_dataagent_session_id", None),
+                execution_id=execution_id,
+                source="sandbox",
+                sandbox_id=self.sandbox_id,
+                requested_model=requested_model,
+                result="cancelled",
+                **_audit_completion_fields(started_monotonic),
+            )
             logger.info("KunCode SSE streaming cancelled by user")
             cancel_reason = (
                 "timeout"
@@ -970,6 +1119,22 @@ class DataAnalysisSandboxAsync(_KunCodeExecutionControl, SandboxAsync):
         terminal_outcome = _finalize_kuncode_outcome(
             accumulated_output,
             terminal_outcome,
+        )
+        _emit_model_audit_event(
+            "kuncode_finished" if terminal_outcome["success"] else "kuncode_failed",
+            request_id=f"kuncode_{execution_id}",
+            execution_id=execution_id,
+            trace_id=getattr(self, "_dataagent_trace_id", None),
+            parent_task_id=getattr(self, "_dataagent_task_id", None),
+            session_id=getattr(self, "_dataagent_session_id", None),
+            source="sandbox",
+            entrypoint="run_kuncode",
+            sandbox_id=self.sandbox_id,
+            requested_model=requested_model,
+            actual_model=requested_model,
+            result="success" if terminal_outcome["success"] else "failed",
+            error_type=terminal_outcome.get("error_code"),
+            **_audit_completion_fields(started_monotonic),
         )
         if not terminal_outcome["success"]:
             accumulated_output = _append_kuncode_failure_hint(accumulated_output)

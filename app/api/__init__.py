@@ -14,6 +14,7 @@ from app.api.plans import router as plans_router
 from app.api.kuncode import router as kuncode_router
 from app.api.system_prompt import router as system_prompt_router
 from app.api.sandbox import router as sandbox_router
+from app.api.model_audits import router as model_audits_router
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(auth_router)
@@ -25,5 +26,6 @@ api_router.include_router(plans_router)
 api_router.include_router(kuncode_router)
 api_router.include_router(system_prompt_router)
 api_router.include_router(sandbox_router)
+api_router.include_router(model_audits_router)
 
 __all__ = ["api_router"]

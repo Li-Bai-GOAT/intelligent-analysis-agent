@@ -74,9 +74,24 @@ def _kuncode_result_event(
 
 
 def _normalize_model_name(model: Optional[str]) -> Optional[str]:
-    if model == "mimo-v2.5-pro":
-        return "mimo/mimo-v2.5-pro"
+    if model == "mimo-v2.6-pro":
+        return "mimo/mimo-v2.6-pro"
     return model
+
+
+def _is_allowed_model(model: Optional[str]) -> bool:
+    requested = _normalize_model_name(model or os.getenv("KUNCODE_MODEL", "mimo/mimo-v2.6-pro"))
+    allowed = {
+        item.strip()
+        for item in os.getenv("ALLOWED_KUNCODE_MODELS", "mimo/mimo-v2.6-pro").split(",")
+        if item.strip()
+    }
+    if requested not in allowed:
+        return False
+    return not (
+        requested.lower().startswith("mimo/")
+        and os.getenv("DISABLE_MIMO", "false").lower() in {"1", "true", "yes", "on"}
+    )
 
 
 def _normalize_agent_name(agent: Optional[str]) -> Optional[str]:
@@ -108,6 +123,10 @@ class KunCodeRequest(BaseModel):
         None,
         description="顶层任务的 Unix epoch 毫秒 deadline",
     )
+    trace_id: Optional[str] = Field(None, description="DataAgent trace ID")
+    task_id: Optional[str] = Field(None, description="DataAgent task ID")
+    dataagent_session_id: Optional[str] = Field(None, description="DataAgent session ID")
+    dataagent_sandbox_id: Optional[str] = Field(None, description="DataAgent sandbox ID")
 
 
 class KunCodeCancelRequest(BaseModel):
@@ -582,6 +601,8 @@ async def run_kuncode_stream(request: KunCodeRequest):
     Returns:
         StreamingResponse: SSE 格式的流式响应
     """
+    if not _is_allowed_model(request.model):
+        raise HTTPException(status_code=403, detail="KunCode 模型未获准")
     # 构建安全的命令参数列表
     cmd = _build_kuncode_command(request)
     

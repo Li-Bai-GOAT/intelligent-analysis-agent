@@ -80,12 +80,81 @@ class Settings(BaseSettings):
     KUNCODE_TERMINATION_CONFIRM_SECONDS: float = 10.0
     
     # AI 模型 - 通用配置
-    MODEL_PROVIDER: str = "deepseek"  # 模型提供商: deepseek, minimax, openai, anthropic
+    MODEL_PROVIDER: str = "mimo"  # 模型提供商: deepseek, minimax, openai, anthropic, mimo
     MODEL_TEMPERATURE: float = 0.5
     MAX_TOKENS: int = 200000
     TOOL_OUTPUT_MAX_LENGTH: int = 8000
     MODEL_STREAM_MAX_RETRIES: int = 2
     MODEL_STREAM_RETRY_DELAY_SECONDS: float = 0.5
+    # Model admission and audit. Empty quota values disable that individual
+    # quota; provider/model allowlists remain fail-closed by default.
+    MODEL_AUDIT_ENABLED: bool = True
+    MODEL_AUDIT_LOG_PATH: str = "logs/model-audit/requests.log"
+    MODEL_AUDIT_RETENTION_DAYS: int = 90
+    ALLOWED_MODEL_PROVIDERS: str = "mimo"
+    ALLOWED_MODEL_NAMES: str = "mimo-v2.6-pro"
+    # Optional compatibility override. When empty, KunCode follows the active
+    # MODEL_PROVIDER and its corresponding model name automatically.
+    KUNCODE_MODEL: str = ""
+    ALLOWED_KUNCODE_MODELS: str = ""
+    DISABLE_MIMO: bool = False
+    MAX_REQUEST_TOKENS: int = 200000
+    DAILY_USER_TOKEN_LIMIT: int = 500000
+    MODEL_MAX_CONCURRENCY: int = 4
+
+    @property
+    def allowed_model_providers(self) -> set[str]:
+        configured = {
+            item.strip().lower()
+            for item in self.ALLOWED_MODEL_PROVIDERS.split(",")
+            if item.strip()
+        }
+        return configured or {self.MODEL_PROVIDER.strip().lower()}
+
+    @property
+    def allowed_model_names(self) -> set[str]:
+        configured = {
+            item.strip()
+            for item in self.ALLOWED_MODEL_NAMES.split(",")
+            if item.strip()
+        }
+        return configured or {self.active_model_name}
+
+    @property
+    def allowed_kuncode_models(self) -> set[str]:
+        configured = {
+            item.strip()
+            for item in self.ALLOWED_KUNCODE_MODELS.split(",")
+            if item.strip()
+        }
+        return configured or {self.effective_kuncode_model}
+
+    @property
+    def active_model_name(self) -> str:
+        """Return the model name selected by MODEL_PROVIDER."""
+        provider = self.MODEL_PROVIDER.strip().lower()
+        model_names = {
+            "deepseek": self.DEEPSEEK_MODEL_NAME,
+            "minimax": self.MINIMAX_MODEL_NAME,
+            "openai": self.OPENAI_MODEL_NAME,
+            "anthropic": self.ANTHROPIC_MODEL_NAME,
+            "mimo": self.MIMO_MODEL_NAME,
+        }
+        return model_names.get(provider, "").strip()
+
+    @property
+    def active_qualified_model(self) -> str:
+        """Return the provider/model form consumed by KunCode."""
+        provider = self.MODEL_PROVIDER.strip().lower()
+        model_name = self.active_model_name
+        if not provider or not model_name:
+            return ""
+        return model_name if "/" in model_name else f"{provider}/{model_name}"
+
+    @property
+    def effective_kuncode_model(self) -> str:
+        """Return the one model that the sandbox should use for this process."""
+        return self.KUNCODE_MODEL.strip() or self.active_qualified_model
     
     # DeepSeek 配置
     DEEPSEEK_API_KEY: str = ""
@@ -111,7 +180,7 @@ class Settings(BaseSettings):
     # Mimo 配置 (OpenAI 兼容)
     MIMO_API_KEY: str = ""
     MIMO_BASE_URL: str = "https://api.xiaomimimo.com/v1"
-    MIMO_MODEL_NAME: str = "mimo-v2.5-pro"
+    MIMO_MODEL_NAME: str = "mimo-v2.6-pro"
     
     # 上下文压缩
     COMPRESS_THRESHOLD_PERCENT: int = 70  # 超过此百分比触发压缩
@@ -145,7 +214,7 @@ class Settings(BaseSettings):
         "_runtime_sandbox_container_container_pool:data_analysis"
     )
     SANDBOX_MANAGER_POOL_SIZE: int = 2
-    SANDBOX_CONFIG_VERSION: str = "deepseek-v1"
+    SANDBOX_CONFIG_VERSION: str = "mimo-v2.6"
     # Comma-separated host environment names that MCP configuration is allowed
     # to reference with {{secret:NAME}}.  An empty list fails closed.
     MCP_SECRET_REFERENCE_ALLOWLIST: str = ""

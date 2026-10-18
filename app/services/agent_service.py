@@ -1282,22 +1282,27 @@ class AgentService:
         compress_provider = settings.COMPRESS_MODEL_PROVIDER or settings.MODEL_PROVIDER
         
         try:
-            if compress_provider.lower() in ("deepseek", "openai"):
+            if compress_provider.lower() in ("deepseek", "openai", "mimo"):
                 # 使用 OpenAI 兼容 API
                 from openai import AsyncOpenAI
+                from app.services.model_factory import ModelFactory
+
+                default_model = (
+                    "gpt-4o-mini"
+                    if compress_provider.lower() == "openai" and not settings.COMPRESS_MODEL_NAME
+                    else None
+                )
+                model_config = ModelFactory.get_model_config(
+                    provider=compress_provider,
+                    model_name=settings.COMPRESS_MODEL_NAME or default_model,
+                )
                 
-                if compress_provider.lower() == "deepseek":
-                    api_key = settings.DEEPSEEK_API_KEY
-                    base_url = settings.DEEPSEEK_BASE_URL
-                    model_name = settings.COMPRESS_MODEL_NAME or settings.DEEPSEEK_MODEL_NAME
-                else:
-                    api_key = settings.OPENAI_API_KEY
-                    base_url = settings.OPENAI_BASE_URL
-                    model_name = settings.COMPRESS_MODEL_NAME or "gpt-4o-mini"
-                
-                client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+                client = AsyncOpenAI(
+                    api_key=model_config.api_key,
+                    base_url=model_config.base_url,
+                )
                 response = await client.chat.completions.create(
-                    model=model_name,
+                    model=model_config.model_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
                     max_tokens=2048,
@@ -1900,6 +1905,35 @@ class AgentService:
         message: str,
         file_ids: Optional[List[str]] = None,
         execution_mode: str = "auto",
+        task_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        from app.observability.model_audit import audit_context
+
+        async with audit_context(
+            trace_id=trace_id,
+            task_id=task_id,
+            session_id=session_id,
+            user_id=user_id,
+            source="backend",
+            entrypoint="conversation_async" if task_id else "conversation_chat",
+        ):
+            async for chunk in self._chat_impl(
+                user_id=user_id,
+                session_id=session_id,
+                message=message,
+                file_ids=file_ids,
+                execution_mode=execution_mode,
+            ):
+                yield chunk
+
+    async def _chat_impl(
+        self,
+        user_id: str,
+        session_id: Optional[str],
+        message: str,
+        file_ids: Optional[List[str]] = None,
+        execution_mode: str = "auto",
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         执行对话（流式输出）
@@ -1970,6 +2004,14 @@ class AgentService:
             sandbox.configure_execution_context(
                 execution_id=deadline.execution_id,
                 deadline_at_ms=deadline.deadline_at_ms,
+            )
+        if hasattr(sandbox, "configure_audit_context"):
+            from app.observability.model_audit import get_audit_context
+            audit = get_audit_context()
+            sandbox.configure_audit_context(
+                trace_id=audit.trace_id if audit else None,
+                task_id=audit.task_id if audit else None,
+                session_id=session_id,
             )
         self._active_sandbox_runs[session_id] = {
             "sandbox": sandbox,

@@ -15,6 +15,7 @@ from typing import Optional
 import docker
 from docker.errors import NotFound, APIError
 
+from app.config import settings
 from app.models import SandboxAgent, SandboxSkill, SandboxMcp
 from app.services.mcp_secrets import McpSecretReferenceError, resolve_mcp_config
 
@@ -171,44 +172,63 @@ class SandboxInjectionService:
             logger.error(f"执行命令失败: {e}")
             return -1, str(e)
     
-    def _ensure_deepseek_provider(self, kuncode_config: dict) -> None:
-        """Ensure KunCode defaults to DeepSeek through its OpenAI-compatible API."""
-        deepseek_model = "deepseek/deepseek-v4-flash"
-        if kuncode_config.get("model") in {
-            None,
-            "{env:KUNCODE_MODEL}",
-            "mimo-v2.5-pro",
-            "mimo/mimo-v2.5-pro",
-        }:
-            kuncode_config["model"] = deepseek_model
-        if kuncode_config.get("small_model") in {
-            None,
-            "{env:KUNCODE_MODEL}",
-            "mimo-v2.5-pro",
-            "mimo/mimo-v2.5-pro",
-        }:
-            kuncode_config["small_model"] = kuncode_config["model"]
-
-        providers = kuncode_config.setdefault("provider", {})
-        providers["deepseek"] = {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": "DeepSeek",
-            "options": {
-                "apiKey": "{env:DEEPSEEK_API_KEY}",
-                "baseURL": "{env:DEEPSEEK_BASE_URL}",
-            },
-            "models": {
-                "deepseek-v4-flash": {
-                    "name": "deepseek-v4-flash",
-                    "tool_call": True,
-                    "temperature": True,
-                    "limit": {
-                        "context": 200000,
-                        "output": 32000,
+    def _ensure_configured_provider(self, kuncode_config: dict) -> None:
+        """Ensure the configured OpenAI-compatible provider is available to KunCode."""
+        provider_name = settings.MODEL_PROVIDER.strip().lower()
+        if provider_name == "mimo":
+            model_name = settings.active_model_name or "mimo-v2.6-pro"
+            qualified_model = f"mimo/{model_name}"
+            provider_config = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Mimo",
+                "options": {
+                    "apiKey": "{env:MIMO_API_KEY}",
+                    "baseURL": "{env:MIMO_BASE_URL}",
+                },
+                "models": {
+                    model_name: {
+                        "name": model_name,
+                        "tool_call": True,
+                        "temperature": True,
+                        "limit": {
+                            "context": 200000,
+                            "output": 32000,
+                        },
                     },
                 },
-            },
-        }
+            }
+        elif provider_name == "deepseek":
+            model_name = settings.active_model_name or "deepseek-v4-flash"
+            qualified_model = f"deepseek/{model_name}"
+            provider_config = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "DeepSeek",
+                "options": {
+                    "apiKey": "{env:DEEPSEEK_API_KEY}",
+                    "baseURL": "{env:DEEPSEEK_BASE_URL}",
+                },
+                "models": {
+                    model_name: {
+                        "name": model_name,
+                        "tool_call": True,
+                        "temperature": True,
+                        "limit": {
+                            "context": 200000,
+                            "output": 32000,
+                        },
+                    },
+                },
+            }
+        else:
+            return
+
+        # The host settings are the source of truth. This also updates an
+        # already injected container when only the model name changed.
+        kuncode_config["model"] = settings.effective_kuncode_model or qualified_model
+        kuncode_config["small_model"] = kuncode_config["model"]
+
+        providers = kuncode_config.setdefault("provider", {})
+        providers[provider_name] = provider_config
 
     async def inject_agents(self, container_id: str) -> dict:
         """
@@ -335,7 +355,7 @@ class SandboxInjectionService:
         else:
             kuncode_config = json.loads(output)
 
-        self._ensure_deepseek_provider(kuncode_config)
+        self._ensure_configured_provider(kuncode_config)
         
         # 更新 MCP 配置（仅合并，不覆盖其他字段）
         if "mcp" not in kuncode_config:

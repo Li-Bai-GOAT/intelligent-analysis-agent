@@ -101,6 +101,7 @@ async def chat(
                 message=data.message,
                 file_ids=data.file_ids,
                 execution_mode=data.execution_mode,
+                trace_id=request.headers.get("X-Trace-ID") or request.state.request_id,
             ):
                 if await request.is_disconnected():
                     break
@@ -148,6 +149,7 @@ async def submit_async_task(
         "message": data.message,
         "file_ids": data.file_ids or [],
         "execution_mode": data.execution_mode,
+        "trace_id": f"trace_{uuid.uuid4().hex}",
     }
 
     # Register ownership and the active task before scheduling. A very fast

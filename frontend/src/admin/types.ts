@@ -1,4 +1,4 @@
-export type AdminSection = 'overview' | 'knowledge' | 'prompt' | 'skills' | 'mcps'
+export type AdminSection = 'overview' | 'knowledge' | 'prompt' | 'skills' | 'mcps' | 'model-audits'
 
 export interface ReadyStatus {
   status: 'ok' | 'unavailable'
@@ -24,6 +24,39 @@ export interface KnowledgeInput {
 
 export interface PaginatedResponse<T> {
   items: T[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface ModelAuditItem {
+  event: string
+  request_id: string
+  trace_id?: string
+  parent_task_id?: string
+  session_id?: string
+  source?: string
+  entrypoint?: string
+  provider?: string
+  requested_model?: string
+  actual_model?: string
+  attempt?: number
+  stream?: boolean
+  started_at?: string
+  finished_at?: string
+  latency_ms?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  usage_source?: string
+  result?: string
+  error_type?: string
+  sandbox_id?: string
+  execution_id?: string
+}
+
+export interface ModelAuditResponse {
+  items: ModelAuditItem[]
   total: number
   limit: number
   offset: number

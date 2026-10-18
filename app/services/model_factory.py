@@ -8,6 +8,7 @@
 import re
 import logging
 import asyncio
+import uuid
 from typing import Any, Literal, Optional
 from dataclasses import dataclass
 
@@ -17,6 +18,14 @@ from agentscope.token import TokenCounterBase, OpenAITokenCounter
 from agentscope.formatter import FormatterBase
 
 from app.config import settings
+from app.observability.model_audit import (
+    AuditRequest,
+    ModelAdmissionError,
+    admission_check,
+    estimate_tokens,
+    extract_usage,
+    request_slot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +44,16 @@ class RetryingStreamingModel:
         *,
         max_retries: int = 2,
         retry_delay_seconds: float = 0.5,
+        provider: str = "unknown",
+        requested_model: str = "unknown",
+        base_url: str | None = None,
     ) -> None:
         self._model = model
         self.max_retries = max(0, max_retries)
         self.retry_delay_seconds = max(0.0, retry_delay_seconds)
+        self.provider = provider
+        self.requested_model = requested_model
+        self.base_url = base_url
 
     @property
     def stream(self) -> bool:
@@ -48,25 +63,78 @@ class RetryingStreamingModel:
         return getattr(self._model, name)
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        response = await self._create_response_with_retry(args, kwargs)
+        prompt_tokens = estimate_tokens(args[0] if args else kwargs.get("messages", []))
+        rejected_audit = AuditRequest(
+            provider=self.provider,
+            requested_model=self.requested_model,
+            base_url=self.base_url,
+            stream=self.stream,
+            estimated_prompt_tokens=prompt_tokens,
+        )
+        slot = request_slot()
+        try:
+            await slot.__aenter__()
+        except ModelAdmissionError as error:
+            rejected_audit.start()
+            rejected_audit.finish("failed", error=error)
+            raise
+        try:
+            response, audit, retries_used = await self._create_response_with_retry(
+                args,
+                kwargs,
+                request_id=f"req_{uuid.uuid4().hex}",
+                first_attempt=1,
+                retries_used=0,
+            )
+        except BaseException:
+            await slot.__aexit__(None, None, None)
+            raise
         if not self.stream or not hasattr(response, "__aiter__"):
+            await slot.__aexit__(None, None, None)
             return response
-        return self._stream_with_retry(response, args, kwargs)
+        return self._stream_with_retry(response, args, kwargs, audit, retries_used, slot)
 
     async def _create_response_with_retry(
         self,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-    ) -> Any:
-        attempt = 0
+        *,
+        request_id: str,
+        first_attempt: int,
+        retries_used: int,
+    ) -> tuple[Any, AuditRequest, int]:
+        attempt = first_attempt
+        prompt_tokens = estimate_tokens(args[0] if args else kwargs.get("messages", []))
         while True:
+            audit = AuditRequest(
+                provider=self.provider,
+                requested_model=self.requested_model,
+                base_url=self.base_url,
+                stream=self.stream,
+                request_id=request_id,
+                attempt=attempt,
+                estimated_prompt_tokens=prompt_tokens,
+            )
             try:
-                return await self._model(*args, **kwargs)
+                if self.provider != "unknown":
+                    admission_check(self.provider, self.requested_model, prompt_tokens)
+                audit.start()
+                response = await self._model(*args, **kwargs)
+                audit.usage = extract_usage(response)
+                if not self.stream or not hasattr(response, "__aiter__"):
+                    audit.finish("success", response=response)
+                return response, audit, retries_used
+            except ModelAdmissionError as error:
+                audit.finish("failed", error=error)
+                raise
             except asyncio.CancelledError:
+                audit.finish("cancelled")
                 raise
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as error:
-                if attempt >= self.max_retries:
+                audit.finish("failed", error=error)
+                if retries_used >= self.max_retries:
                     raise
+                retries_used += 1
                 attempt += 1
                 logger.warning(
                     "Model request could not establish a stream; retrying: attempt=%s/%s error=%s",
@@ -76,30 +144,67 @@ class RetryingStreamingModel:
                 )
                 if self.retry_delay_seconds:
                     await asyncio.sleep(self.retry_delay_seconds * attempt)
-
-    async def _stream_with_retry(self, response: Any, args: tuple[Any, ...], kwargs: dict[str, Any]):
-        attempt = 0
-        current_response = response
-        while True:
-            try:
-                async for chunk in current_response:
-                    yield chunk
-                return
-            except asyncio.CancelledError:
+            except Exception as error:
+                audit.finish("failed", error=error)
                 raise
-            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as error:
-                if attempt >= self.max_retries:
+
+    async def _stream_with_retry(
+        self,
+        response: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        audit: AuditRequest,
+        retries_used: int,
+        slot: Any,
+    ):
+        current_response = response
+        current_usage = None
+        try:
+            while True:
+                try:
+                    async for chunk in current_response:
+                        audit.chunks += 1
+                        usage = extract_usage(chunk)
+                        if usage:
+                            current_usage = usage
+                        yield chunk
+                    audit.usage = current_usage
+                    audit.finish("success", response=current_response)
+                    return
+                except asyncio.CancelledError:
+                    audit.finish("cancelled")
                     raise
-                attempt += 1
-                logger.warning(
-                    "Model stream interrupted; retrying before tool execution: attempt=%s/%s error=%s",
-                    attempt,
-                    self.max_retries,
-                    error,
-                )
-                if self.retry_delay_seconds:
-                    await asyncio.sleep(self.retry_delay_seconds * attempt)
-                current_response = await self._create_response_with_retry(args, kwargs)
+                except GeneratorExit:
+                    audit.finish("cancelled")
+                    raise
+                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as error:
+                    audit.usage = current_usage
+                    audit.finish("partial" if audit.chunks else "failed", error=error)
+                    if retries_used >= self.max_retries:
+                        raise
+                    retries_used += 1
+                    logger.warning(
+                        "Model stream interrupted; retrying before tool execution: attempt=%s/%s error=%s",
+                        audit.attempt + 1,
+                        self.max_retries,
+                        error,
+                    )
+                    if self.retry_delay_seconds:
+                        await asyncio.sleep(self.retry_delay_seconds * retries_used)
+                    current_response, audit, retries_used = await self._create_response_with_retry(
+                        args,
+                        kwargs,
+                        request_id=audit.request_id,
+                        first_attempt=audit.attempt + 1,
+                        retries_used=retries_used,
+                    )
+                    current_usage = None
+                except Exception as error:
+                    audit.usage = current_usage
+                    audit.finish("partial" if audit.chunks else "failed", error=error)
+                    raise
+        finally:
+            await slot.__aexit__(None, None, None)
 
 
 class SimpleTokenCounter(TokenCounterBase):
@@ -199,14 +304,17 @@ class ModelFactory:
     """
     
     @staticmethod
-    def get_model_config() -> ModelConfig:
-        """从 settings 获取当前模型配置"""
-        provider = settings.MODEL_PROVIDER.lower()
+    def get_model_config(
+        provider: str | None = None,
+        model_name: str | None = None,
+    ) -> ModelConfig:
+        """从 settings 获取模型配置，可为辅助调用临时指定 provider/model。"""
+        provider = (provider or settings.MODEL_PROVIDER).strip().lower()
         
         if provider == "deepseek":
             return ModelConfig(
                 provider="deepseek",
-                model_name=settings.DEEPSEEK_MODEL_NAME,
+                model_name=model_name or settings.DEEPSEEK_MODEL_NAME,
                 api_key=settings.DEEPSEEK_API_KEY,
                 base_url=settings.DEEPSEEK_BASE_URL,
                 max_tokens=settings.MAX_TOKENS,
@@ -216,7 +324,7 @@ class ModelFactory:
         elif provider == "minimax":
             return ModelConfig(
                 provider="minimax",
-                model_name=settings.MINIMAX_MODEL_NAME,
+                model_name=model_name or settings.MINIMAX_MODEL_NAME,
                 api_key=settings.MINIMAX_API_KEY,
                 base_url=settings.MINIMAX_BASE_URL,
                 max_tokens=settings.MAX_TOKENS,
@@ -227,7 +335,7 @@ class ModelFactory:
         elif provider == "openai":
             return ModelConfig(
                 provider="openai",
-                model_name=settings.OPENAI_MODEL_NAME,
+                model_name=model_name or settings.OPENAI_MODEL_NAME,
                 api_key=settings.OPENAI_API_KEY,
                 base_url=settings.OPENAI_BASE_URL if hasattr(settings, 'OPENAI_BASE_URL') else None,
                 max_tokens=settings.MAX_TOKENS,
@@ -237,7 +345,7 @@ class ModelFactory:
         elif provider == "anthropic":
             return ModelConfig(
                 provider="anthropic",
-                model_name=settings.ANTHROPIC_MODEL_NAME,
+                model_name=model_name or settings.ANTHROPIC_MODEL_NAME,
                 api_key=settings.ANTHROPIC_API_KEY,
                 base_url=settings.ANTHROPIC_BASE_URL if hasattr(settings, 'ANTHROPIC_BASE_URL') else None,
                 max_tokens=settings.MAX_TOKENS,
@@ -248,7 +356,7 @@ class ModelFactory:
         elif provider == "mimo":
             return ModelConfig(
                 provider="mimo",
-                model_name=settings.MIMO_MODEL_NAME,
+                model_name=model_name or settings.MIMO_MODEL_NAME,
                 api_key=settings.MIMO_API_KEY,
                 base_url=settings.MIMO_BASE_URL,
                 max_tokens=settings.MAX_TOKENS,
@@ -292,6 +400,9 @@ class ModelFactory:
                 model,
                 max_retries=settings.MODEL_STREAM_MAX_RETRIES,
                 retry_delay_seconds=settings.MODEL_STREAM_RETRY_DELAY_SECONDS,
+                provider=config.provider,
+                requested_model=config.model_name,
+                base_url=config.base_url,
             )
 
         elif provider in ("minimax", "anthropic"):
@@ -314,6 +425,9 @@ class ModelFactory:
                 model,
                 max_retries=settings.MODEL_STREAM_MAX_RETRIES,
                 retry_delay_seconds=settings.MODEL_STREAM_RETRY_DELAY_SECONDS,
+                provider=config.provider,
+                requested_model=config.model_name,
+                base_url=config.base_url,
             )
         
         else:

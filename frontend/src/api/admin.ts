@@ -14,6 +14,7 @@ import type {
   SkillFileContent,
   SkillFileTree,
   SystemPrompt,
+  ModelAuditResponse,
 } from '../admin/types'
 
 async function errorMessage(response: Response, fallback: string) {
@@ -22,6 +23,14 @@ async function errorMessage(response: Response, fallback: string) {
 }
 
 export class AdminApi {
+  static getModelAudits(filters: Record<string, string> = {}) {
+    const params = new URLSearchParams({ limit: '100', offset: '0' })
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) params.set(key, value)
+    })
+    return Api.request<ModelAuditResponse>('GET', '/admin/model-audits?' + params.toString())
+  }
+
   static async getReadyStatus(): Promise<ReadyStatus> {
     const response = await fetch('/ready', { headers: Api.token ? { Authorization: `Bearer ${Api.token}` } : {} })
     const data = await response.json().catch(() => null) as ReadyStatus | null

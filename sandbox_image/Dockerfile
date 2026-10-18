@@ -11,7 +11,9 @@ LABEL description="Data Analysis Sandbox with KunCode AI"
 # ============= 环境变量配置 =============
 # KunCode 所需的 LLM API 环境变量（运行时通过 docker run -e 传入）
 ENV PATH="/root/.local/bin:${PATH}"
-ENV KUNCODE_MODEL="deepseek/deepseek-v4-flash"
+ENV KUNCODE_MODEL="mimo/mimo-v2.6-pro"
+ENV ALLOWED_KUNCODE_MODELS="mimo/mimo-v2.6-pro"
+ENV DISABLE_MIMO="false"
 ENV PYTHONUTF8="1"
 ENV PYTHONIOENCODING="utf-8"
 ENV LANG="C.UTF-8"

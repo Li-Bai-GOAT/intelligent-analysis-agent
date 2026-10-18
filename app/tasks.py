@@ -223,6 +223,8 @@ async def _execute_analyze_task(request_dict: Dict[str, Any], task_id: str) -> D
             message=message,
             file_ids=file_ids,
             execution_mode=execution_mode,
+            task_id=task_id,
+            trace_id=request_dict.get("trace_id") or f"trace_{task_id}",
         ):
             await agent_service.write_task_stream(task_id, chunk, session_id)
             if chunk.get("type") == "end":
@@ -318,6 +320,8 @@ async def _execute_auto_continue(session_id: str, user_id: str, preview_id: str,
             user_id=user_id,
             session_id=session_id,
             message="继续",
+            task_id=task_id,
+            trace_id=f"trace_{task_id}",
             file_ids=[],
         ):
             await agent_service.write_task_stream(task_id, chunk, session_id)

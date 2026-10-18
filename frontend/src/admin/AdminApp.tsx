@@ -1,4 +1,4 @@
-import { BrainCircuit, Boxes, Database, Gauge, PlugZap } from 'lucide-react'
+import { Activity, BrainCircuit, Boxes, Database, Gauge, PlugZap } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { useAuthStore } from '../stores/auth'
 import { useUiStore } from '../stores/ui'
@@ -8,6 +8,7 @@ import { KnowledgePage } from './pages/KnowledgePage'
 import { PromptPage } from './pages/PromptPage'
 import { SkillsPage } from './pages/SkillsPage'
 import { McpsPage } from './pages/McpsPage'
+import { ModelAuditsPage } from './pages/ModelAuditsPage'
 
 const navigation: Array<{ key: AdminSection; label: string; description: string; icon: typeof Gauge }> = [
   { key: 'overview', label: '运行总览', description: '依赖与配置状态', icon: Gauge },
@@ -15,6 +16,7 @@ const navigation: Array<{ key: AdminSection; label: string; description: string;
   { key: 'prompt', label: '系统提示词', description: '管理产品经理规则', icon: BrainCircuit },
   { key: 'skills', label: 'Skills', description: 'KunCode 能力包', icon: Boxes },
   { key: 'mcps', label: 'MCP', description: '外部工具服务', icon: PlugZap },
+  { key: 'model-audits', label: '模型审计', description: '调用、Token 与失败记录', icon: Activity },
 ]
 
 function CurrentPage({ section, readOnly }: { section: AdminSection; readOnly: boolean }) {
@@ -22,6 +24,7 @@ function CurrentPage({ section, readOnly }: { section: AdminSection; readOnly: b
   if (section === 'prompt') return <PromptPage readOnly={readOnly} />
   if (section === 'skills') return <SkillsPage readOnly={readOnly} />
   if (section === 'mcps') return <McpsPage readOnly={readOnly} />
+  if (section === 'model-audits') return <ModelAuditsPage />
   return <OverviewPage />
 }
 
