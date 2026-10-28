@@ -5,7 +5,6 @@
 提供智能体对话接口，支持 SSE 流式输出和异步任务
 """
 
-import json
 import re
 from typing import Literal, Optional, List
 
@@ -13,14 +12,40 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.config import settings
 from app.models.user import User
 from app.api.deps import get_current_user
 from app.services.agent_service import AgentService
 from app.services.postgres_session_history import PostgresSessionHistoryService
 from app.repositories.session_repo import SessionRepository
+from app.utils.sse import HEARTBEAT_FRAME, encode_sse_event, iter_with_heartbeat, MIN_HEARTBEAT_SECONDS
 
 
 router = APIRouter(prefix="/conversation", tags=["对话"])
+
+
+def _heartbeat_interval() -> float:
+    """每次建流时读配置，方便运维热调（无需重启进程也能生效于新连接）。"""
+    try:
+        configured = float(settings.SSE_HEARTBEAT_SECONDS)
+    except (TypeError, ValueError):
+        configured = 15.0
+    return max(MIN_HEARTBEAT_SECONDS, configured)
+
+
+async def _stream_frames(source, request: Request, encode):
+    """把业务事件流转成 SSE 帧字符串，并在静默期插入心跳。
+
+    心跳以注释帧 ``: keep-alive`` 发出，不含 data 段，前端解析时会被忽略；
+    它唯一的作用是让代理层看到连接仍然是活的。
+    """
+    async for item in iter_with_heartbeat(source, _heartbeat_interval()):
+        if await request.is_disconnected():
+            return
+        if item is None:
+            yield HEARTBEAT_FRAME
+        else:
+            yield encode(item)
 
 
 async def _require_session_owner(user_id: str, session_id: str) -> None:
@@ -95,19 +120,21 @@ async def chat(
     
     async def event_generator():
         try:
-            async for chunk in agent_service.chat(
-                user_id=str(user.id),
-                session_id=data.session_id,
-                message=data.message,
-                file_ids=data.file_ids,
-                execution_mode=data.execution_mode,
-                trace_id=request.headers.get("X-Trace-ID") or request.state.request_id,
+            async for frame in _stream_frames(
+                agent_service.chat(
+                    user_id=str(user.id),
+                    session_id=data.session_id,
+                    message=data.message,
+                    file_ids=data.file_ids,
+                    execution_mode=data.execution_mode,
+                    trace_id=request.headers.get("X-Trace-ID") or request.state.request_id,
+                ),
+                request,
+                encode_sse_event,
             ):
-                if await request.is_disconnected():
-                    break
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                yield frame
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+            yield encode_sse_event({"type": "error", "content": str(e)})
     
     return StreamingResponse(
         event_generator(),
@@ -249,18 +276,22 @@ async def stream_task(
     last_event_id = request.headers.get("last-event-id", "0")
     if last_event_id != "0" and not re.fullmatch(r"\d+-\d+", last_event_id):
         last_event_id = "0"
-    
+
+    def encode_task_event(chunk: dict) -> str:
+        # ``_stream_id`` 只用于 SSE 的 id 行，不能出现在 data 里污染前端投影。
+        stream_id = chunk.pop("_stream_id", None)
+        return encode_sse_event(chunk, event_id=stream_id)
+
     async def event_generator():
         try:
-            async for data in agent_service.read_task_stream(task_id, last_id=last_event_id):
-                if await request.is_disconnected():
-                    break
-                stream_id = data.pop("_stream_id", None)
-                if stream_id:
-                    yield f"id: {stream_id}\n"
-                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+            async for frame in _stream_frames(
+                agent_service.read_task_stream(task_id, last_id=last_event_id),
+                request,
+                encode_task_event,
+            ):
+                yield frame
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+            yield encode_sse_event({"type": "error", "content": str(e)})
     
     return StreamingResponse(
         event_generator(),

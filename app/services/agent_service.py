@@ -13,6 +13,7 @@ import os
 import re
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional, AsyncGenerator, Dict, Any, List, Literal
 from datetime import datetime, timezone
 
@@ -641,11 +642,32 @@ def streaming_sandbox_tool_adapter(func):
     return wrapper
 
 
+@dataclass(frozen=True)
+class ApprovedPlan:
+    """用户确认过的计划快照（保留原文，供错误提示与回显使用）。"""
+
+    name: str
+    subtasks: tuple[str, ...]
+    normalized_name: str
+    normalized_subtasks: tuple[str, ...]
+
+
 class PlanConfirmationGate:
-    """只允许一次与用户已确认预览相符的 ``create_plan`` 调用。"""
+    """只允许一次与用户已确认预览相符的 ``create_plan`` 调用。
+
+    判定口径（2026-10 修订）：**子任务序列是计划的实质身份，名称不是。**
+
+    ``preview_plan`` 是给用户看的自然语言，``create_plan`` 是给模型用的结构化
+    入参；两者在名称上几乎不可能逐字一致（模型会补全、缩写、换标点，用户也能在
+    计划面板里改名字）。旧实现要求名称也必须字节级归一化后相等，于是合法确认被
+    判为"未确认"，模型收到拒绝后按提示重新 ``preview_plan``——用户就会看到同一份
+    计划被要求确认两次（缺陷 A 的直接现象）。
+
+    现在的规则：数量一致 + 每个子任务都能匹配上已确认项 -> 通过；名称差异只记日志。
+    """
 
     def __init__(self) -> None:
-        self._approved: tuple[str, tuple[str, ...]] | None = None
+        self._approved: ApprovedPlan | None = None
         self._cancelled = False
 
     @staticmethod
@@ -724,10 +746,23 @@ class PlanConfirmationGate:
         self._approved = None
         self._cancelled = False
 
+    @classmethod
+    def identity(cls, name: str, subtasks) -> tuple[str, tuple[str, ...]]:
+        """归一化后的计划指纹，用于判断"是不是同一份计划"。"""
+        return (
+            cls._normalize_item(name),
+            tuple(cls._normalize_item(subtask) for subtask in subtasks),
+        )
+
     def approve(self, name: str, subtasks: list[str]) -> None:
-        self._approved = (
-            self._normalize_item(name),
-            tuple(self._normalize_item(subtask) for subtask in subtasks),
+        raw_subtasks = tuple(str(subtask or "") for subtask in subtasks)
+        self._approved = ApprovedPlan(
+            name=str(name or ""),
+            subtasks=raw_subtasks,
+            normalized_name=self._normalize_item(name),
+            normalized_subtasks=tuple(
+                self._normalize_item(subtask) for subtask in raw_subtasks
+            ),
         )
         self._cancelled = False
 
@@ -735,20 +770,39 @@ class PlanConfirmationGate:
         self._approved = None
         self._cancelled = True
 
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def pending_approval(self) -> ApprovedPlan | None:
+        """返回尚未被消费的确认快照（用于给模型的纠错提示）。"""
+        return self._approved
+
     def consume(self, name: str, subtasks: list[str]) -> bool:
         if self._cancelled or self._approved is None:
             return False
-        approved_name, approved_subtasks = self._approved
-        requested_name = self._normalize_item(name)
-        if (
-            approved_name != requested_name
-            or len(approved_subtasks) != len(subtasks)
-            or not all(
-                self._subtask_matches(approved, requested)
-                for approved, requested in zip(approved_subtasks, subtasks)
+
+        approved = self._approved
+        requested_subtasks = [self._normalize_item(subtask) for subtask in subtasks]
+        if len(approved.normalized_subtasks) != len(requested_subtasks):
+            return False
+        if not all(
+            self._subtask_matches(approved_item, requested_item)
+            for approved_item, requested_item in zip(
+                approved.normalized_subtasks, requested_subtasks
             )
         ):
             return False
+
+        requested_name = self._normalize_item(name)
+        if approved.normalized_name != requested_name:
+            logger.info(
+                "Plan name differs from the approved preview but every subtask matches: "
+                "approved=%r requested=%r",
+                approved.name,
+                name,
+            )
+
         self._approved = None
         return True
 
@@ -760,6 +814,44 @@ class ConfirmedPlanNotebook(PlanNotebook):
         super().__init__(**kwargs)
         self._confirmation_gate = confirmation_gate
         self.last_finished_plan = None
+
+    def _describe_rejection(self, name: str, subtask_names: list[str]) -> str:
+        """给模型一条可执行的纠错指令，而不是让它再去打扰用户。
+
+        旧文案是"Call preview_plan and wait for confirmation"，模型照做就会对同一
+        份计划再弹一次确认——正是缺陷 A 的重复弹窗。现在的文案要求它直接用
+        **用户已经确认过的那份内容**重试一次，不再走预览。
+        """
+        if self._confirmation_gate.is_cancelled:
+            return (
+                "Error: The user cancelled this plan, so create_plan is not allowed. "
+                "Do not call preview_plan again. Tell the user the plan was cancelled "
+                "and ask what they want to do next."
+            )
+
+        approved = self._confirmation_gate.pending_approval()
+        requested = ", ".join(subtask_names) or "(none)"
+        if approved is None:
+            return (
+                "Error: No plan preview was confirmed by the user, so create_plan is "
+                f"not allowed (requested subtasks: {requested}). "
+                "Call preview_plan once, wait for the user's confirmation, then call "
+                "create_plan with exactly the subtasks returned by preview_plan."
+            )
+
+        approved_lines = "\n".join(
+            f"  {index}. {item}" for index, item in enumerate(approved.subtasks, 1)
+        )
+        return (
+            "Error: create_plan does not match the plan the user already confirmed, "
+            "so it was not created. Do NOT call preview_plan again — the user has "
+            "already confirmed; asking twice is a bug.\n"
+            f"Requested subtasks: {requested}\n"
+            "Confirmed plan (use these values verbatim):\n"
+            f"  name: {approved.name}\n"
+            f"  subtasks:\n{approved_lines}\n"
+            "Call create_plan again now with exactly this name and these subtasks."
+        )
 
     async def create_plan(
         self,
@@ -780,10 +872,7 @@ class ConfirmedPlanNotebook(PlanNotebook):
             return ToolResponse(
                 content=[{
                     "type": "text",
-                    "text": (
-                        "Error: This plan was not confirmed by the user. "
-                        "Call preview_plan and wait for confirmation before create_plan."
-                    ),
+                    "text": self._describe_rejection(name, subtask_names),
                 }],
                 metadata={"success": False, "confirmation_required": True},
             )
@@ -979,7 +1068,12 @@ def create_preview_plan_tool(
     让用户预览和编辑 AI 生成的计划，返回编辑后的计划供后续 create_plan 使用
     """
     from app.api.kuncode import create_plan_preview, wait_for_plan_confirm
-    
+
+    # 同一轮对话内「已问过用户」的计划指纹 -> 当时的结论。
+    # 工具闭包随 agent 一起按轮创建，所以这份缓存不会跨轮，用户下次真要重做同样
+    # 的计划时仍会正常弹出确认。
+    resolved_previews: dict[tuple[str, tuple[str, ...]], ToolResponse] = {}
+
     async def preview_plan(name: str, subtasks: list[str]) -> ToolResponse:
         """让用户预览和编辑计划
         
@@ -993,7 +1087,18 @@ def create_preview_plan_tool(
         Returns:
             用户确认后的计划（JSON格式，包含 name 和 subtasks）
         """
-        
+        identity = PlanConfirmationGate.identity(name, subtasks)
+        cached = resolved_previews.get(identity)
+        if cached is not None:
+            # 用户已经对同一份计划表过态，再弹一次就是重复打扰（缺陷 A 的可见症状）。
+            logger.info(
+                "preview_plan repeated for an already-resolved plan; reusing the "
+                "previous answer (session=%s, name=%r)",
+                session_id,
+                name,
+            )
+            return cached
+
         confirmation_gate.begin_preview()
 
         # 生成预览 ID
@@ -1038,10 +1143,12 @@ def create_preview_plan_tool(
                 "action": "cancel",
                 "cancelled": True,
             })
-            return ToolResponse(
+            response = ToolResponse(
                 content=[{"type": "text", "text": "[用户取消了计划]"}],
                 metadata={"success": False, "cancelled": True},
             )
+            resolved_previews[identity] = response
+            return response
         
         # 获取用户编辑后的内容
         is_auto_confirm = result.get("action") == "auto_confirm"
@@ -1064,7 +1171,7 @@ def create_preview_plan_tool(
             result_text += f"  {i}. {st}\n"
         result_text += "\n请使用以上内容调用 create_plan 创建计划。"
         
-        return ToolResponse(
+        response = ToolResponse(
             content=[{"type": "text", "text": result_text}],
             metadata={
                 "success": True, 
@@ -1073,6 +1180,8 @@ def create_preview_plan_tool(
                 "auto_confirm": is_auto_confirm
             },
         )
+        resolved_previews[identity] = response
+        return response
     
     return preview_plan
 

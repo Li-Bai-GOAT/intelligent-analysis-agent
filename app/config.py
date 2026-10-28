@@ -200,6 +200,11 @@ class Settings(BaseSettings):
     SANDBOX_LEASE_SECONDS: int = 1800
     SANDBOX_CLEANUP_INTERVAL_SECONDS: int = 300
     SANDBOX_MAX_ACTIVE_CONTAINERS: int = 8
+
+    # SSE 心跳间隔。长任务在模型思考/沙箱执行期间可能几十秒没有任何输出，
+    # 代理层（nginx 60s、多数网关 90s）会判定连接失联而断开。只要小于最小
+    # 代理超时的一半即可；15s 给 90s 网关留了 6 次机会。
+    SSE_HEARTBEAT_SECONDS: float = 15.0
     SANDBOX_MAX_RELEASE_ATTEMPTS: int = 3
     SANDBOX_ORPHAN_GRACE_SECONDS: int = 900
     # Default to observation-only for containers that have no database fact.

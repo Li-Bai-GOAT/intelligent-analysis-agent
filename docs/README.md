@@ -44,6 +44,7 @@
 
 | 报告 | 状态 |
 | --- | --- |
+| [计划确认与 SSE 心跳修复](reports/plan-hitl-and-sse-heartbeat-validation.md) | 已验证；闸门误判与重复确认弹窗修复，SSE 15s 心跳上线，真实链路 6/6 断言通过。 |
 | [接口与权限契约验收](reports/api-permission-contract-validation.md) | 已验证；42 项进程内契约 + 7 项真实依赖契约通过，修复 4 个越权/契约缺陷。 |
 | [核心浏览器 E2E 验收](reports/core-browser-e2e-validation.md) | 已验证；9 项确定性用例与 3 项真实服务冒烟通过。 |
 | [数据 Skill / 知识库 E2E 验收](reports/data-skill-knowledge-e2e-validation.md) | 有条件通过；历史真实接口与沙箱证据。 |

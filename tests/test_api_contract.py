@@ -30,6 +30,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from app.api.deps import get_admin_user, get_current_user
+from app.api import conversation as conversation_api
 from app.main import app as fastapi_app
 from app.models.user import User
 from app.repositories.file_repo import FileRepository, SandboxBindingRepository
@@ -645,6 +646,38 @@ class TaskStreamContractTests(_ContractCase):
         ]
         self.assertEqual([p["content"] for p in payloads], ["chunk-1", "chunk-2", "chunk-3"])
         self.assertEqual(response.headers["content-type"].split(";")[0], "text/event-stream")
+
+    def test_silent_task_stream_keeps_the_connection_alive(self):
+        """缺陷 B：任务几十秒没输出时，代理会因静默超时断开。
+
+        这里让任务流在第一个事件之前先静默几倍心跳周期，断言响应体里出现了
+        心跳注释帧、并且业务事件仍然完整按序到达。
+        """
+        async def slow_stream(task_id, last_id="0"):
+            await asyncio.sleep(0.3)  # 模拟模型思考/沙箱执行期间的静默
+            for index in range(1, 3):
+                yield {"type": "text", "content": f"chunk-{index}", "_stream_id": f"{index}-0"}
+
+        self.login_as(USER_A)
+        with (
+            patch.object(AgentService, "read_task_stream", staticmethod(slow_stream)),
+            patch.object(conversation_api.settings, "SSE_HEARTBEAT_SECONDS", 0.05),
+        ):
+            response = self.client.get("/api/conversation/stream/task-slow")
+
+        body = response.text
+        self.assertGreaterEqual(
+            body.count(": keep-alive"), 2, f"静默期没有心跳，连接会被代理掐断: {body!r}"
+        )
+        ids = re.findall(r"^id: (.+)$", body, flags=re.MULTILINE)
+        self.assertEqual(ids, ["1-0", "2-0"])
+        # 心跳是注释帧，不能顶替或打乱业务帧
+        payloads = [
+            json.loads(line[len("data: "):])
+            for line in body.splitlines()
+            if line.startswith("data: ")
+        ]
+        self.assertEqual([p["content"] for p in payloads], ["chunk-1", "chunk-2"])
 
 
 class _RaceRedis:
