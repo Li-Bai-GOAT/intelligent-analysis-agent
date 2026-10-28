@@ -95,6 +95,42 @@ jobs:
       - name: Typecheck and production build
         run: npm run build
 
+  frontend_unit:
+    name: Frontend unit tests (state machine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        # 阈值定义在 vitest.config.ts，本地与 CI 共用。
+        run: npm run test:unit:coverage
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-unit-results
+          path: |
+            frontend/coverage/
+            frontend/test-results/vitest-junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
   e2e:
     name: Playwright Mock E2E
     runs-on: ubuntu-latest
@@ -145,7 +181,7 @@ jobs:
     name: Quality gate
     # 分支保护只需要求这一个检查；任何必需 job 失败或被跳过都会让它变红。
     if: always()
-    needs: [backend, frontend, e2e]
+    needs: [backend, frontend, frontend_unit, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -153,10 +189,11 @@ jobs:
         env:
           BACKEND: ${{ needs.backend.result }}
           FRONTEND: ${{ needs.frontend.result }}
+          UNIT: ${{ needs.frontend_unit.result }}
           E2E: ${{ needs.e2e.result }}
         run: |
           failed=0
-          for job in BACKEND FRONTEND E2E; do
+          for job in BACKEND FRONTEND UNIT E2E; do
             result="${!job}"
             echo "$job=$result"
             if [ "$result" != "success" ]; then
