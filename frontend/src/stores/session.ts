@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { Api } from '../api/client'
-import type { Session, Message, StreamData, PlanData, ToolExecutionStatus, ToolRuntimeStage } from '../types'
+import type { Session, Message, StreamData, PlanData, ToolCall, ToolExecutionStatus, ToolRuntimeStage } from '../types'
 import { useUiStore } from './ui'
-import { extractMessageContent, finalizeTurnMessages, mergeThinking, projectHistoryMessages } from './conversationProjection'
+import { extractMessageContent, finalizeTurnMessages, mergeThinking, projectHistoryMessages, resultStatus } from './conversationProjection'
 
 function updateTurn(
   messages: Message[],
@@ -39,6 +39,26 @@ interface StreamState {
   currentToolAttemptIndex: number | null
   seenToolIds: Set<string>
   terminalCommands: Set<string>
+  // A tool_result may arrive before its tool_call when the stream is replayed or
+  // reordered. Buffer it here and merge it when the call shows up, so the
+  // terminal output is never silently dropped.
+  pendingToolResults: Map<string, Partial<ToolCall>>
+}
+
+function freshStreamState(activeTurnId: string | null = null): StreamState {
+  return {
+    activeTurnId,
+    thinkingBlock: null,
+    assistantEl: null,
+    currentToolId: null,
+    currentToolName: null,
+    currentToolStage: null,
+    currentToolMessage: null,
+    currentToolAttemptIndex: null,
+    seenToolIds: new Set(),
+    terminalCommands: new Set(),
+    pendingToolResults: new Map(),
+  }
 }
 
 interface StreamConnection {
@@ -166,18 +186,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   uploadedFileIds: [],
   contextInfo: null,
   isStreaming: false,
-  streamState: {
-    activeTurnId: null,
-    thinkingBlock: null,
-    assistantEl: null,
-    currentToolId: null,
-    currentToolName: null,
-    currentToolStage: null,
-    currentToolMessage: null,
-    currentToolAttemptIndex: null,
-    seenToolIds: new Set(),
-    terminalCommands: new Set(),
-  },
+  streamState: freshStreamState(),
   currentEventSource: null,
   _selectVersion: 0,
   pendingPreview: null,
@@ -245,18 +254,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       currentPlan: null,
       planLoading: true,
       planError: null,
-      streamState: {
-        activeTurnId: null,
-        thinkingBlock: null,
-        assistantEl: null,
-        currentToolId: null,
-        currentToolName: null,
-        currentToolStage: null,
-        currentToolMessage: null,
-        currentToolAttemptIndex: null,
-        seenToolIds: new Set(),
-        terminalCommands: new Set(),
-      },
+      streamState: freshStreamState(),
     })
 
     try {
@@ -300,8 +298,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }))
         const eventSource = Api.streamTask(
           activeTaskId,
-          (data) => get().handleStreamData(data as unknown as StreamData),
           (data) => {
+            // A slower session load or a stale EventSource must never project
+            // into the session the user has switched to.
+            if (get()._selectVersion !== version || get().currentSession !== sessionId) return
+            get().handleStreamData(data as unknown as StreamData)
+          },
+          (data) => {
+            if (get()._selectVersion !== version) return
             if (data.type === 'error' && get().isStreaming) {
               get().handleStreamData(data as unknown as StreamData)
             }
@@ -389,24 +393,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         currentPlan: null,
         planLoading: true,
         planError: null,
-        streamState: {
-          activeTurnId: result.task_id,
-          thinkingBlock: null,
-          assistantEl: null,
-          currentToolId: null,
-          currentToolName: null,
-          currentToolStage: null,
-          currentToolMessage: null,
-          currentToolAttemptIndex: null,
-          seenToolIds: new Set(),
-          terminalCommands: new Set(),
-        },
+        streamState: freshStreamState(result.task_id),
       }))
       console.log('[SessionStore] task submitted:', result.task_id)
+      const streamSessionId = state.currentSession
       const eventSource = Api.streamTask(
         result.task_id,
-        (data) => get().handleStreamData(data as unknown as StreamData),
         (data) => {
+          // Ignore events that arrive after the user switched sessions.
+          if (get().currentSession !== streamSessionId) return
+          get().handleStreamData(data as unknown as StreamData)
+        },
+        (data) => {
+          if (get().currentSession !== streamSessionId) return
           if (data.type === 'error' && get().isStreaming) {
             get().handleStreamData(data as unknown as StreamData)
           }
@@ -507,18 +506,32 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         set((current) => {
           const seen = new Set(current.streamState.seenToolIds)
           seen.add(toolId)
+          const buffered = current.streamState.pendingToolResults.get(toolId)
+          const pendingToolResults = buffered
+            ? (() => {
+              const next = new Map(current.streamState.pendingToolResults)
+              next.delete(toolId)
+              return next
+            })()
+            : current.streamState.pendingToolResults
           return {
             messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => {
               const toolCalls = [...(message.tool_calls || [])]
               const index = toolCalls.findIndex((tool) => tool.id === toolId)
+              // Replayed streams resend tool_call for calls that already have a
+              // result. Never downgrade those back to "running", and never let a
+              // payload-less replay erase the arguments captured the first time.
+              const previous = toolCalls[index]
+              const settled = previous?.execution_status
               const nextTool = {
                 id: toolId,
-                name: toolName,
-                arguments: toolInput,
-                execution_status: 'running' as const,
+                name: toolName || previous?.name || '',
+                arguments: toolInput || previous?.arguments || '',
+                execution_status: settled && settled !== 'running' ? settled : 'running' as const,
                 ...(data.stage ? { stage: data.stage } : {}),
                 ...(data.message ? { stage_message: data.message } : {}),
                 ...(data.attempt_index ? { attempt_index: data.attempt_index } : {}),
+                ...(buffered ?? {}),
               }
               if (index >= 0) toolCalls[index] = { ...toolCalls[index], ...nextTool }
               else toolCalls.push(nextTool)
@@ -527,6 +540,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             streamState: {
               ...current.streamState,
               seenToolIds: seen,
+              pendingToolResults,
               currentToolId: toolId,
               currentToolName: toolName,
               currentToolStage: data.stage || null,
@@ -540,45 +554,61 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       case 'tool_progress':
       case 'tool_result': {
         const isProgress = data.type === 'tool_progress'
+        const toolId = data.tool_id || ''
         const resultText = extractMessageContent(data.content ?? data.result ?? '')
+        // Single source of truth for the terminal state: the same classifier the
+        // history projection uses. Keeping two implementations made a live empty
+        // tool_result report "completed" while reloading the session showed
+        // "failed" for the very same record.
         const executionStatus = (isProgress
           ? 'running'
-          : data.execution_status || (
-            resultText.toLowerCase().includes('[error]') ? 'failed' : 'completed'
-          )) as ToolExecutionStatus
-        set((current) => ({
-          messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => ({
-            ...message,
-            tool_calls: message.tool_calls?.map((tool) => tool.id === data.tool_id
-              ? (
-                isProgress && tool.execution_status && tool.execution_status !== 'running'
-                  ? tool
-                  : {
-                    ...tool,
-                    ...(resultText || !isProgress ? { result: resultText } : {}),
-                    execution_status: executionStatus,
-                    ...(data.stage ? { stage: data.stage } : {}),
-                    ...(data.message ? { stage_message: data.message } : {}),
-                    ...(data.attempt_index ? { attempt_index: data.attempt_index } : {}),
-                    ...(typeof data.exit_code === 'number' ? { exit_code: data.exit_code } : {}),
-                    ...(data.error_code ? { error_code: data.error_code } : {}),
-                    ...(data.termination_reason ? { termination_reason: data.termination_reason } : {}),
-                    ...(typeof data.termination_confirmed === 'boolean'
-                      ? { termination_confirmed: data.termination_confirmed }
-                      : {}),
-                  }
-              )
-              : tool),
-          })),
-          streamState: data.tool_id === current.streamState.currentToolId
-            ? {
+          : data.execution_status || resultStatus(resultText)) as ToolExecutionStatus
+        const patch: Partial<ToolCall> = {
+          ...(resultText ? { result: resultText } : {}),
+          execution_status: executionStatus,
+          ...(data.stage ? { stage: data.stage } : {}),
+          ...(data.message ? { stage_message: data.message } : {}),
+          ...(data.attempt_index ? { attempt_index: data.attempt_index } : {}),
+          ...(typeof data.exit_code === 'number' ? { exit_code: data.exit_code } : {}),
+          ...(data.error_code ? { error_code: data.error_code } : {}),
+          ...(data.termination_reason ? { termination_reason: data.termination_reason } : {}),
+          ...(typeof data.termination_confirmed === 'boolean'
+            ? { termination_confirmed: data.termination_confirmed }
+            : {}),
+        }
+        set((current) => {
+          const hasTool = current.messages.some((message) => message.role === 'assistant'
+            && message.tool_calls?.some((tool) => tool.id === toolId))
+          // A result whose call has not arrived yet is buffered instead of
+          // dropped, so reordered events cannot lose the tool output.
+          const pendingToolResults = !isProgress && toolId && !hasTool
+            ? new Map(current.streamState.pendingToolResults).set(toolId, patch)
+            : current.streamState.pendingToolResults
+          return {
+            messages: updateTurn(current.messages, current.streamState.activeTurnId, (message) => ({
+              ...message,
+              tool_calls: message.tool_calls?.map((tool) => tool.id === toolId
+                ? (
+                  // A late progress event must never downgrade a terminal state.
+                  isProgress && tool.execution_status && tool.execution_status !== 'running'
+                    ? tool
+                    : { ...tool, ...patch }
+                )
+                : tool),
+            })),
+            streamState: {
               ...current.streamState,
-              currentToolStage: data.stage || current.streamState.currentToolStage,
-              currentToolMessage: data.message || current.streamState.currentToolMessage,
-              currentToolAttemptIndex: data.attempt_index || current.streamState.currentToolAttemptIndex,
-            }
-            : current.streamState,
-        }))
+              pendingToolResults,
+              ...(data.tool_id === current.streamState.currentToolId
+                ? {
+                  currentToolStage: data.stage || current.streamState.currentToolStage,
+                  currentToolMessage: data.message || current.streamState.currentToolMessage,
+                  currentToolAttemptIndex: data.attempt_index || current.streamState.currentToolAttemptIndex,
+                }
+                : {}),
+            },
+          }
+        })
         break
       }
       case 'context_update': {
