@@ -143,10 +143,17 @@ class SandboxFileService:
         return files
     
     async def download_uploaded_file(self, session_id: str, filename: str) -> Optional[bytes]:
-        """下载用户上传的文件"""
-        local_path = USER_UPLOADS_DIR / session_id / filename
+        """下载用户上传的文件
+
+        纵深防御：即使调用方漏掉文件名校验，这里也保证解析后的路径仍在
+        该会话的上传目录内，不会顺着 ``../`` 读到别的会话或仓库外文件。
+        """
+        local_base = (USER_UPLOADS_DIR / session_id).resolve()
+        local_path = (local_base / filename).resolve()
+        if local_path != local_base and local_base not in local_path.parents:
+            return None
         try:
-            if local_path.exists() and local_path.is_file():
+            if local_path.is_file():
                 return local_path.read_bytes()
             return None
         except Exception:

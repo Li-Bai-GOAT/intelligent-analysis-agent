@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.models.user import User
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_owned_session
 from app.services.file_service import FileService, SandboxFileService
 from app.schemas.file import (
     FileUploadResponse,
@@ -146,10 +146,29 @@ async def download_file(
 
 # ==================== 用户上传文件操作 ====================
 
+_SAFE_UPLOAD_NAME_FORBIDDEN = {"", ".", ".."}
+
+
+def _is_safe_upload_filename(filename: str) -> bool:
+    """上传文件名只能是一层普通文件名，禁止分隔符与相对路径。
+
+    ``/files/uploads/{session_id}/download?filename=`` 最终会拼到
+    ``USER_UPLOADS_DIR / session_id / filename``，若不校验就存在
+    ``../../`` 穿越到其他会话目录甚至仓库外部的风险。
+    """
+    if filename in _SAFE_UPLOAD_NAME_FORBIDDEN:
+        return False
+    if "/" in filename or "\\" in filename:
+        return False
+    if os.path.basename(filename) != filename:
+        return False
+    return "\x00" not in filename
+
+
 @router.get("/uploads/{session_id}/list", summary="列出用户上传的文件")
 async def list_uploaded_files(
     session_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """列出用户上传的文件（对话时会自动同步到沙箱）"""
     sandbox_file_service = SandboxFileService(None)
@@ -161,9 +180,12 @@ async def list_uploaded_files(
 async def download_uploaded_file(
     session_id: str,
     filename: str = Query(..., description="文件名"),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """下载用户上传的文件"""
+    if not _is_safe_upload_filename(filename):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的文件名")
+
     sandbox_file_service = SandboxFileService(None)
     content = await sandbox_file_service.download_uploaded_file(session_id, filename)
     

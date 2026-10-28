@@ -44,6 +44,7 @@
 
 | 报告 | 状态 |
 | --- | --- |
+| [接口与权限契约验收](reports/api-permission-contract-validation.md) | 已验证；41 项进程内契约 + 7 项真实依赖契约通过，修复 4 个越权/契约缺陷。 |
 | [核心浏览器 E2E 验收](reports/core-browser-e2e-validation.md) | 已验证；9 项确定性用例与 3 项真实服务冒烟通过。 |
 | [数据 Skill / 知识库 E2E 验收](reports/data-skill-knowledge-e2e-validation.md) | 有条件通过；历史真实接口与沙箱证据。 |
 | [聊天输入视觉 QA](reports/chat-input-visual-qa.md) | 被认证状态阻塞，尚未完成登录后视觉对比。 |

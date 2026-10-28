@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 import redis.asyncio as aioredis
 
 from app.models.user import User
-from app.api.deps import get_current_user
+from app.api.deps import require_owned_session
 from app.config import settings
 
 router = APIRouter(prefix="/kuncode", tags=["Kuncode预览"])
@@ -51,12 +51,25 @@ async def _get_redis() -> aioredis.Redis:
     return aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
+async def _acquire_confirm_lock(redis, key: str, *, ttl: int = 15) -> None:
+    """串行化同一预览的确认动作。
+
+    确认流程是典型的 read-check-write（读 pending -> 校验状态 -> 写确认结果），
+    双击或前端重试并发进来时，两个请求可能都读到 status=pending 而都判定为
+    首次确认，导致一次预览被确认两次（可能触发两轮工具执行）。
+    这里用 Redis 的 ``SET NX`` 做一次性互斥，第二个并发请求直接 409。
+    """
+    acquired = await redis.set(key, "1", ex=ttl, nx=True)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="该请求正在处理中，请勿重复提交")
+
+
 # ==================== API Endpoints ====================
 
 @router.get("/{session_id}/pending", summary="获取待确认的 Kuncode 请求")
 async def get_pending_kuncode(
     session_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """获取当前会话中待确认的 Kuncode 请求"""
     redis = await _get_redis()
@@ -182,7 +195,7 @@ async def confirm_kuncode(
     session_id: str,
     preview_id: str,
     request: KuncodeConfirmRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """
     确认或取消 Kuncode 执行
@@ -194,7 +207,9 @@ async def confirm_kuncode(
     try:
         preview_key = _get_preview_key(session_id, preview_id)
         pending_key = _get_pending_key(session_id)
-        
+
+        await _acquire_confirm_lock(redis, f"kuncode_confirm_lock:{session_id}:{preview_id}")
+
         data = await redis.get(preview_key)
         if not data:
             raise HTTPException(status_code=404, detail="预览请求不存在或已过期")
@@ -250,7 +265,7 @@ async def confirm_plan(
     session_id: str,
     preview_id: str,
     request: PlanConfirmRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """
     确认或取消计划预览
@@ -284,7 +299,7 @@ class AutoContinueConfirmRequest(BaseModel):
 async def confirm_auto_continue_api(
     session_id: str,
     request: AutoContinueConfirmRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """
     确认或取消自动继续
@@ -303,7 +318,7 @@ async def confirm_auto_continue_api(
 @router.post("/{session_id}/auto_continue/reset", summary="重置自动继续倒计时")
 async def reset_auto_continue_api(
     session_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """
     重置自动继续倒计时（用户输入时调用）
@@ -315,7 +330,7 @@ async def reset_auto_continue_api(
 @router.post("/{session_id}/preview/reset", summary="重置预览倒计时")
 async def reset_preview_timer_api(
     session_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """
     重置当前预览（kuncode/plan/ask_user）的倒计时（用户编辑时调用）
@@ -333,7 +348,7 @@ class UpdatePlanPreviewRequest(BaseModel):
 async def update_plan_preview_api(
     session_id: str,
     request: UpdatePlanPreviewRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_owned_session),
 ):
     """
     更新计划预览的内容（用户编辑时实时保存）
@@ -621,6 +636,8 @@ async def confirm_plan_preview(
     try:
         pending_key = _get_plan_pending_key(session_id)
         confirm_key = _get_plan_confirm_key(session_id, preview_id)
+
+        await _acquire_confirm_lock(redis, f"kuncode_plan_confirm_lock:{session_id}:{preview_id}")
 
         preview_key = _get_plan_preview_key(session_id, preview_id)
         pending_preview_id = await redis.get(pending_key)

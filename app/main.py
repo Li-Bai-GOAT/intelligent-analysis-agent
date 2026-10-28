@@ -183,6 +183,14 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}", include_in_schema=False)
         async def serve_spa(full_path: str):
+            # API 命名空间下未定义的路径必须返回 JSON 404，不能落进 SPA
+            # 兜底返回 index.html（否则客户端会把 200 + HTML 当成成功响应，
+            # 掩盖版本不一致时的接口缺失）。
+            if full_path == "api" or full_path.startswith("api/"):
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": "接口不存在"},
+                )
             requested_file = dist_dir / full_path
             if full_path and requested_file.is_file():
                 return FileResponse(requested_file)
