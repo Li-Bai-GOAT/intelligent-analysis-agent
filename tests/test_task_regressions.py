@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import inspect
+import os
 import queue
 import tarfile
 import json
@@ -870,8 +871,15 @@ class TaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["execution_status"], "completed")
 
     async def test_workspace_path_check_rejects_prefix_collision(self):
-        self.assertTrue(_is_within_workspace(r"C:\data\workspace\report.txt", r"C:\data\workspace"))
-        self.assertFalse(_is_within_workspace(r"C:\data\workspace-secret\report.txt", r"C:\data\workspace"))
+        # os.path.commonpath 依赖运行平台的分隔符：用平台原生绝对路径构造用例，
+        # 保证 Linux CI 也真正执行这条安全回归，而不是只对 Windows 路径有效。
+        root = Path(os.path.abspath(os.sep))
+        workspace = str(root / "data" / "workspace")
+        self.assertTrue(_is_within_workspace(str(root / "data" / "workspace" / "report.txt"), workspace))
+        self.assertFalse(_is_within_workspace(str(root / "data" / "workspace-secret" / "report.txt"), workspace))
+        if os.name == "nt":
+            self.assertTrue(_is_within_workspace(r"C:\data\workspace\report.txt", r"C:\data\workspace"))
+            self.assertFalse(_is_within_workspace(r"C:\data\workspace-secret\report.txt", r"C:\data\workspace"))
 
     async def test_delivery_file_listing_hides_internal_execution_artifacts(self):
         self.assertTrue(_is_internal_workspace_item("scripts/build_report.py", is_directory=False))
