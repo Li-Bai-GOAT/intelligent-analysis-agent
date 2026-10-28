@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 测试全部为 Mock/纯逻辑回归，不需要真实模型密钥、数据库或 Docker。
+  ENVIRONMENT: testing
+  JWT_SECRET: ci-only-not-a-production-secret
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  backend:
+    name: Backend tests + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Run backend tests with coverage
+        run: >-
+          uv run --frozen --with coverage
+          coverage run -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Verify POSIX process-group tests are not skipped
+        # Windows 上这 3 项会 skip；CI 必须真正执行，否则门禁形同虚设。
+        run: |
+          set -euo pipefail
+          output=$(uv run --frozen python -m unittest tests.test_kuncode_process_integration -v 2>&1)
+          echo "$output"
+          if grep -q "skipped=" <<<"$output"; then
+            echo "::error::POSIX process-group tests were skipped on Linux CI."
+            exit 1
+          fi
+
+      - name: Coverage report and threshold gate
+        # fail_under 定义在 pyproject.toml，本地与 CI 使用同一阈值。
+        run: |
+          uv run --frozen --with coverage coverage xml -o coverage.xml
+          uv run --frozen --with coverage coverage report
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  frontend:
+    name: Frontend lint + typecheck + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Typecheck and production build
+        run: npm run build
+
+  e2e:
+    name: Playwright Mock E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Mock E2E suite
+        # @live 用例需要真实模型与凭据，只在受控环境手动运行。
+        run: npm run test:e2e
+
+      - name: Upload Playwright HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload traces, videos and JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: frontend/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  quality-gate:
+    name: Quality gate
+    # 分支保护只需要求这一个检查；任何必需 job 失败或被跳过都会让它变红。
+    if: always()
+    needs: [backend, frontend, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every required job succeeded
+        env:
+          BACKEND: ${{ needs.backend.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          E2E: ${{ needs.e2e.result }}
+        run: |
+          failed=0
+          for job in BACKEND FRONTEND E2E; do
+            result="${!job}"
+            echo "$job=$result"
+            if [ "$result" != "success" ]; then
+              echo "::error::Required check $job finished with '$result'."
+              failed=1
+            fi
+          done
+          exit "$failed"

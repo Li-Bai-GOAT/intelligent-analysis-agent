@@ -32,3 +32,16 @@ dependencies = [
 tortoise_orm = "app.database.TORTOISE_ORM"
 location = "./migrations"
 src_folder = "./."
+
+# 覆盖率配置：本地与 CI 共用，避免门禁阈值只存在于流水线里。
+# 基线：2026-10-28 实测 90 项测试、总覆盖率 41.13%（6382 行）。
+# 阈值只用于防止退化；提升覆盖率后应同步上调，不要下调来让 PR 变绿。
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_empty = true
+fail_under = 40
+

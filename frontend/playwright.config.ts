@@ -7,7 +7,15 @@ export default defineConfig({
   fullyParallel: true,
   timeout: 30_000,
   expect: { timeout: 8_000 },
-  reporter: [['list'], ['html', { open: 'never' }]],
+  // CI 额外输出 GitHub 注解与 JUnit，便于在 PR 中定位失败并归档测试结果。
+  reporter: process.env.CI
+    ? [
+        ['github'],
+        ['list'],
+        ['html', { open: 'never' }],
+        ['junit', { outputFile: 'test-results/junit.xml' }],
+      ]
+    : [['list'], ['html', { open: 'never' }]],
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     trace: 'retain-on-failure',
