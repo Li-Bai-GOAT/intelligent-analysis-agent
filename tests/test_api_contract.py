@@ -78,6 +78,10 @@ class _ContractCase(unittest.TestCase):
                 continue
             if route.path.startswith(PUBLIC_API_PREFIXES):
                 continue
+            # 不进 OpenAPI 的是兜底/内部路由（如 /api/** 的 404 兜底），
+            # 它们本来就不对业务开放，不属于"受保护端点"的检查范围。
+            if route.include_in_schema is False:
+                continue
             routes.append(route)
         return routes
 
@@ -807,10 +811,22 @@ class RoutingFallbackContractTests(_ContractCase):
     """未知 API 路径必须是 JSON 404，不能落到 SPA 的 index.html。"""
 
     def test_unknown_api_path_returns_404(self):
-        response = self.client.get("/api/does-not-exist")
+        for path in ("/api/does-not-exist", "/api/files/does/not/exist"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertTrue(
+                    response.headers.get("content-type", "").startswith(
+                        "application/json"
+                    ),
+                    f"未知 API 路径必须返回 JSON，实际: {response.headers.get('content-type')}",
+                )
+                self.assertEqual(response.json()["detail"], "接口不存在")
+
+    def test_unknown_api_path_with_write_method_is_404(self):
+        response = self.client.post("/api/nope", json={"a": 1})
         self.assertEqual(response.status_code, 404)
-        if response.headers.get("content-type", "").startswith("application/json"):
-            self.assertEqual(response.json()["detail"], "接口不存在")
+        self.assertEqual(response.json()["detail"], "接口不存在")
 
     def test_health_endpoint_stays_public(self):
         response = self.client.get("/live")
